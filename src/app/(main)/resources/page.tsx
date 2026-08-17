@@ -96,7 +96,14 @@ const visibilityIcons = {
 };
 
 export default function ResourcesPage() {
-  const [documents, setDocuments] = useState<Document[]>(mockDocuments);
+  const [documents, setDocuments] = useState<Document[]>([]);
+
+  React.useEffect(() => {
+    fetch("/api/documents")
+      .then((r) => r.json())
+      .then((d) => setDocuments(d.documents || d || []))
+      .catch(() => setDocuments([]));
+  }, []);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [showUpload, setShowUpload] = useState(false);
   const [uploadingFiles, setUploadingFiles] = useState<{ name: string; progress: number }[]>([]);
@@ -116,8 +123,18 @@ export default function ResourcesPage() {
     }));
     setUploadingFiles((prev) => [...prev, ...newUploads]);
 
-    // Simulate upload progress
-    files.forEach((file, index) => {
+    // Upload to real API
+    files.forEach(async (file, index) => {
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        const response = await fetch("/api/documents", { method: "POST", body: form });
+        const data = await response.json();
+        setDocuments((prev) => [data.document || data, ...prev]);
+      } catch (e) {
+        console.error("upload failed", e);
+      }
+      /*
       let progress = 0;
       const interval = setInterval(() => {
         progress += Math.random() * 15;
@@ -150,6 +167,7 @@ export default function ResourcesPage() {
         );
       }, 200);
     });
+    */
   };
 
   return (

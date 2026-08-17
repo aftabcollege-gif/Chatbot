@@ -11,8 +11,15 @@ import {
   jsonb,
   primaryKey,
   index,
+  customType,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType() { return "vector(1536)"; },
+  toDriver(value) { return `[${value.join(",")}]`; },
+  fromDriver(value) { return String(value).slice(1, -1).split(",").filter(Boolean).map(Number); },
+});
 
 // ============================================================
 // ORGANIZATIONS & DEPARTMENTS
@@ -176,6 +183,7 @@ export const documentChunks = pgTable(
     parentChunkId: uuid("parent_chunk_id"),
     chunkIndex: integer("chunk_index").notNull(),
     content: text("content").notNull(),
+    embedding: vector("embedding"),
     contentNormalized: text("content_normalized"),
     pageNumber: integer("page_number"),
     section: varchar("section", { length: 500 }),
@@ -208,6 +216,7 @@ export const knowledgeItems = pgTable(
     result: varchar("result", { length: 20 }),
     lessonLearned: text("lesson_learned").notNull(),
     suggestion: text("suggestion"),
+    embedding: vector("embedding"),
     visibility: varchar("visibility", { length: 20 }).default("department"),
     status: varchar("status", { length: 30 }).default("DRAFT"),
     reviewedBy: uuid("reviewed_by").references(() => users.id),
