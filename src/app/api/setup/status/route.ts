@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { setupStatus, users } from "@/db/schema";
 import { count } from "drizzle-orm";
+import { ensureDatabaseMigrated } from "@/db/migrate";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
+    await ensureDatabaseMigrated();
     const [status] = await db.select().from(setupStatus).limit(1);
     
     if (status?.completed) {

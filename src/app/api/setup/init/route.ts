@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { users, organizations, roles, userRoles, permissions, rolePermissions, setupStatus } from "@/db/schema";
 import bcrypt from "bcryptjs";
+import { ensureDatabaseMigrated } from "@/db/migrate";
 
 export async function POST(request: NextRequest) {
   try {
+    await ensureDatabaseMigrated();
     const body = await request.json();
     const { name, email, username, password, organizationName } = body;
 
@@ -149,6 +151,32 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Setup error:", error);
+
+    const pgError = error as { code?: string; constraint?: string } | null;
+
+    if (pgError?.code === "23505") {
+      const field = pgError.constraint?.includes("email")
+        ? "ایمیل"
+        : pgError.constraint?.includes("username")
+        ? "نام کاربری"
+        : "اطلاعات";
+      return NextResponse.json(
+        { error: `${field} وارد شده تکراری است` },
+        { status: 400 }
+      );
+    }
+
+    if (pgError?.code === "42P01") {
+      // Table missing even after attempting migrations — surface a clearer message.
+      return NextResponse.json(
+        {
+          error:
+            "ساختار پایگاه داده هنوز آماده نیست. لطفاً چند لحظه دیگر دوباره تلاش کنید.",
+        },
+        { status: 503 }
+      );
+    }
+
     return NextResponse.json(
       { error: "خطا در راه‌اندازی سیستم" },
       { status: 500 }
