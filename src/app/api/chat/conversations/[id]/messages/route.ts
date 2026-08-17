@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { conversations, messages, users } from "@/db/schema";
-import { eq, and, asc } from "drizzle-orm";
+import { conversations, messages, messageSources, users } from "@/db/schema";
+import { eq, and, asc, inArray } from "drizzle-orm";
 import { jwtVerify } from "jose";
-import { isAIConfigured } from "@/lib/ai";
+import { answerWithRag } from "@/lib/rag";
 
 const JWT_SECRET = new TextEncoder().encode(
   process.env.JWT_SECRET || "change-this-to-random-64-char-string"
@@ -18,6 +18,31 @@ async function getUserId(request: NextRequest): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function loadSourcesByMessageIds(messageIds: string[]) {
+  if (!messageIds.length) return new Map<string, Array<Record<string, unknown>>>();
+  const rows = await db
+    .select()
+    .from(messageSources)
+    .where(inArray(messageSources.messageId, messageIds));
+
+  const map = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of rows) {
+    const list = map.get(row.messageId) ?? [];
+    list.push({
+      id: row.sourceId,
+      type: row.sourceType,
+      title: row.heading || row.section || "منبع",
+      pageNumber: row.pageNumber,
+      section: row.section,
+      heading: row.heading,
+      relevanceScore: row.relevanceScore ?? 0,
+      citationIndex: row.citationIndex,
+    });
+    map.set(row.messageId, list);
+  }
+  return map;
 }
 
 export async function GET(
@@ -35,6 +60,8 @@ export async function GET(
     .where(eq(messages.conversationId, id))
     .orderBy(asc(messages.createdAt));
 
+  const sourcesByMessage = await loadSourcesByMessageIds(msgs.map((m) => m.id));
+
   return NextResponse.json({
     messages: msgs.map((m) => ({
       id: m.id,
@@ -42,6 +69,7 @@ export async function GET(
       content: m.content,
       confidenceScore: m.confidenceScore,
       createdAt: m.createdAt?.toISOString(),
+      sources: sourcesByMessage.get(m.id) ?? [],
     })),
   });
 }
@@ -85,26 +113,20 @@ export async function POST(
 
   let answerText: string;
   let confidence = 0;
+  let sources: Awaited<ReturnType<typeof answerWithRag>>["sources"] = [];
 
-  if (isAIConfigured()) {
-    try {
-      // Get user info for RAG context
-      const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-      const orgId = user?.organizationId || "";
-      const deptId = user?.departmentId || null;
+  try {
+    const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    const orgId = user?.organizationId || "";
+    const deptId = user?.departmentId || null;
 
-      const { answerWithRag } = await import("@/lib/rag");
-      const result = await answerWithRag(content, orgId, deptId, userId);
-      answerText = result.answer;
-      confidence = result.confidence;
-    } catch (error) {
-      console.error("RAG error:", error);
-      answerText = "متأسفانه در پردازش درخواست شما خطایی رخ داد. لطفاً دوباره تلاش کنید.";
-    }
-  } else {
-    // Fallback: simple response without AI
-    answerText = `سلام! پیام شما دریافت شد: "${content.trim().substring(0, 100)}"\n\nدر حال حاضر سرویس هوش مصنوعی پیکربندی نشده است. برای فعال‌سازی پاسخ‌دهی هوشمند، لطفاً متغیرهای محیطی AI_BASE_URL و AI_API_KEY را تنظیم کنید.\n\nاز مدل‌های رایگان مانند Hugging Face Inference API یا OpenRouter می‌توانید استفاده کنید.`;
-    confidence = 0;
+    const result = await answerWithRag(content.trim(), orgId, deptId, userId);
+    answerText = result.answer;
+    confidence = result.confidence;
+    sources = result.sources;
+  } catch (error) {
+    console.error("RAG error:", error);
+    answerText = "متأسفانه در پردازش درخواست شما خطایی رخ داد. لطفاً دوباره تلاش کنید.";
   }
 
   const responseTimeMs = Date.now() - startTime;
@@ -118,6 +140,22 @@ export async function POST(
     responseTimeMs,
     tokenCount: Math.ceil(answerText.length / 4),
   }).returning();
+
+  if (sources.length) {
+    await db.insert(messageSources).values(
+      sources.map((source, index) => ({
+        messageId: assistantMessage.id,
+        sourceType: source.sourceType,
+        sourceId: source.documentId || source.knowledgeId || source.id,
+        chunkId: source.sourceType === "document" ? source.id : null,
+        pageNumber: source.pageNumber,
+        section: source.section,
+        heading: source.heading || source.title,
+        relevanceScore: source.relevanceScore,
+        citationIndex: index + 1,
+      }))
+    );
+  }
 
   // Update conversation title if it's the first message
   if (!conversation.title) {
@@ -140,6 +178,17 @@ export async function POST(
       content: assistantMessage.content,
       confidenceScore: assistantMessage.confidenceScore,
       createdAt: assistantMessage.createdAt?.toISOString(),
+      sources: sources.map((source, index) => ({
+        id: source.documentId || source.knowledgeId || source.id,
+        type: source.sourceType,
+        title: source.heading || source.title,
+        pageNumber: source.pageNumber,
+        section: source.section,
+        heading: source.heading,
+        relevanceScore: source.relevanceScore,
+        snippet: source.content?.slice(0, 220),
+        citationIndex: index + 1,
+      })),
     },
   });
 }

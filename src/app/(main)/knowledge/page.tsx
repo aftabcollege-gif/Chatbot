@@ -6,9 +6,10 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/shared/EmptyState";
-import { Brain, Plus, Search, Clock, User, Tag, Building2 } from "lucide-react";
+import { Brain, Plus, Search, Clock, User, Tag, Building2, Send, CheckCircle2, Globe2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getRelativeTime } from "@/lib/persian-date";
+import { useAuth } from "@/lib/auth-context";
 
 interface KnowledgeItemData {
   id: string;
@@ -38,6 +39,8 @@ const tabs = [
 ];
 
 export default function KnowledgePage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin" || !!user?.permissions?.includes("*");
   const [activeTab, setActiveTab] = useState("all");
   const [items, setItems] = useState<KnowledgeItemData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -124,7 +127,7 @@ export default function KnowledgePage() {
         ) : (
           <div className="space-y-4">
             {filteredItems.map((item) => (
-              <KnowledgeCard key={item.id} item={item} />
+              <KnowledgeCard key={item.id} item={item} isAdmin={isAdmin} onChanged={fetchItems} />
             ))}
           </div>
         )}
@@ -133,8 +136,31 @@ export default function KnowledgePage() {
   );
 }
 
-function KnowledgeCard({ item }: { item: KnowledgeItemData }) {
+function KnowledgeCard({
+  item,
+  isAdmin,
+  onChanged,
+}: {
+  item: KnowledgeItemData;
+  isAdmin: boolean;
+  onChanged: () => void;
+}) {
   const status = statusConfig[item.status] || statusConfig.DRAFT;
+  const [updating, setUpdating] = useState(false);
+
+  const updateStatus = async (nextStatus: string) => {
+    setUpdating(true);
+    try {
+      const res = await fetch(`/api/knowledge/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (res.ok) onChanged();
+    } finally {
+      setUpdating(false);
+    }
+  };
 
   return (
     <Card className="p-5 hover:border-emerald-500/30 transition-all">
@@ -168,6 +194,27 @@ function KnowledgeCard({ item }: { item: KnowledgeItemData }) {
           <p className="text-sm text-gray-300 line-clamp-2">{item.lessonLearned}</p>
         </div>
       )}
+
+      <div className="flex items-center gap-2 mt-4">
+        {item.status === "DRAFT" && (
+          <Button size="sm" variant="outline" className="gap-1" disabled={updating} onClick={() => updateStatus("PENDING")}>
+            <Send size={14} />
+            ارسال برای تأیید
+          </Button>
+        )}
+        {isAdmin && item.status === "PENDING" && (
+          <Button size="sm" variant="outline" className="gap-1" disabled={updating} onClick={() => updateStatus("APPROVED")}>
+            <CheckCircle2 size={14} />
+            تأیید (قابل استفاده در چت)
+          </Button>
+        )}
+        {isAdmin && item.status === "APPROVED" && (
+          <Button size="sm" variant="outline" className="gap-1" disabled={updating} onClick={() => updateStatus("PUBLISHED")}>
+            <Globe2 size={14} />
+            انتشار عمومی
+          </Button>
+        )}
+      </div>
     </Card>
   );
 }

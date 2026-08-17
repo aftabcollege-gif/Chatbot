@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
 import { Bot, User } from "lucide-react";
 import type { Message } from "@/types/chat";
+import { SourcesPanel } from "@/components/chat/SourcesPanel";
 
 interface MessageBubbleProps {
   message: Message;
@@ -47,6 +48,10 @@ export function MessageBubble({ message, userName }: MessageBubbleProps) {
           <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
             <span>اطمینان: {Math.round(message.confidenceScore * 100)}%</span>
           </div>
+        )}
+
+        {!isUser && message.sources && message.sources.length > 0 && (
+          <SourcesPanel sources={message.sources} className="mt-3" />
         )}
       </div>
     </div>

@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { SignJWT } from "jose";
 import { v4 as uuidv4 } from "uuid";
+import { logEvent } from "@/lib/audit";
 
 const JWT_SECRET = new TextEncoder().encode(
   process.env.JWT_SECRET || "change-this-to-random-64-char-string"
@@ -38,6 +39,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!user) {
+      await logEvent({ eventCode: "auth.login_failed", actorName: username, request });
       return NextResponse.json(
         { error: "نام کاربری یا رمز عبور اشتباه است" },
         { status: 401 }
@@ -46,6 +48,7 @@ export async function POST(request: NextRequest) {
 
     const isValid = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) {
+      await logEvent({ eventCode: "auth.login_failed", actorId: user.id, actorName: user.name, request });
       return NextResponse.json(
         { error: "نام کاربری یا رمز عبور اشتباه است" },
         { status: 401 }
@@ -59,6 +62,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    await logEvent({ eventCode: "auth.login", actorId: user.id, actorName: user.name, request });
     return await createSession(user, request);
   } catch (error) {
     console.error("Login error:", error);

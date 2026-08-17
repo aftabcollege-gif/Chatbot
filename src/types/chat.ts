@@ -7,6 +7,7 @@ export interface Source {
   heading?: string;
   relevanceScore: number;
   snippet?: string;
+  citationIndex?: number;
 }
 
 export interface Message {
@@ -17,6 +18,12 @@ export interface Message {
   sources?: Source[];
   createdAt?: string;
 }
+
+export const SOURCE_TYPE_LABELS: Record<Source["type"], string> = {
+  document: "سند",
+  knowledge: "دانش سازمانی",
+  web: "وب",
+};
 
 export interface Conversation {
   id: string;

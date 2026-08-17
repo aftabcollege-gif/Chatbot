@@ -11,15 +11,14 @@ import {
   jsonb,
   primaryKey,
   index,
-  customType,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
-const vector = customType<{ data: number[]; driverData: string }>({
-  dataType() { return "vector(1536)"; },
-  toDriver(value) { return `[${value.join(",")}]`; },
-  fromDriver(value) { return String(value).slice(1, -1).split(",").filter(Boolean).map(Number); },
-});
+// Embeddings are stored as plain JSON number arrays (jsonb) instead of the
+// PostgreSQL "vector" type so the project works out of the box without the
+// pgvector extension installed. Similarity search is computed in application
+// code (see src/lib/local-embeddings.ts and src/lib/vector-search.ts).
+const vector = (name: string) => jsonb(name).$type<number[]>();
 
 // ============================================================
 // ORGANIZATIONS & DEPARTMENTS

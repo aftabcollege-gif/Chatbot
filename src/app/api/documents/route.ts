@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { documents, users } from "@/db/schema";
 import { jwtVerify } from "jose";
+import { logEvent } from "@/lib/audit";
 
 const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "change-this-to-random-64-char-string");
 
@@ -73,32 +74,14 @@ export async function POST(request: NextRequest) {
     }).returning();
 
     try {
-      const { isAIConfigured, createEmbeddings } = await import("@/lib/ai");
-      
+      const { getEmbeddings } = await import("@/lib/embeddings");
+
       const rows: (typeof documentChunks.$inferInsert)[] = [];
-      
-      if (isAIConfigured()) {
-        const batchSize = 32;
-        for (let i = 0; i < chunks.length; i += batchSize) {
-          const batch = chunks.slice(i, i + batchSize);
-          const embeddings = await createEmbeddings(batch.map((item) => item.content));
-          rows.push(...batch.map((item, j) => ({
-            documentId: document.id,
-            organizationId: owner.organizationId!,
-            departmentId: owner.departmentId,
-            chunkIndex: item.chunkIndex,
-            content: item.content,
-            contentNormalized: item.content.toLowerCase(),
-            sourceType: "document",
-            visibility: "organization",
-            tokenCount: Math.ceil(item.content.length / 4),
-            embedding: embeddings[j],
-            metadata: {},
-          })));
-        }
-      } else {
-        // Store chunks without embeddings
-        rows.push(...chunks.map((item) => ({
+      const batchSize = 32;
+      for (let i = 0; i < chunks.length; i += batchSize) {
+        const batch = chunks.slice(i, i + batchSize);
+        const embeddings = await getEmbeddings(batch.map((item) => item.content));
+        rows.push(...batch.map((item, j) => ({
           documentId: document.id,
           organizationId: owner.organizationId!,
           departmentId: owner.departmentId,
@@ -108,12 +91,22 @@ export async function POST(request: NextRequest) {
           sourceType: "document",
           visibility: "organization",
           tokenCount: Math.ceil(item.content.length / 4),
+          embedding: embeddings[j],
           metadata: {},
         })));
       }
 
       await db.insert(documentChunks).values(rows);
       const [ready] = await db.update(documents).set({ status: "READY", processingProgress: 100, updatedAt: new Date() }).where(eq(documents.id, document.id)).returning();
+      await logEvent({
+        eventCode: "document.upload",
+        actorId: owner.id,
+        actorName: owner.name,
+        resourceType: "document",
+        resourceId: document.id,
+        resourceName: document.title,
+        request,
+      });
       return NextResponse.json({ document: ready, chunks: rows.length }, { status: 201 });
     } catch (processingError) {
       await db.update(documents).set({ status: "ERROR", processingError: processingError instanceof Error ? processingError.message : "خطای پردازش", updatedAt: new Date() }).where(eq(documents.id, document.id));

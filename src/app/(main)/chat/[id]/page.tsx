@@ -25,12 +25,13 @@ export default function ChatConversationPage({ params }: { params: Promise<{ id:
           const data = await res.json();
           setTitle(data.conversation?.title || "گفتگوی جدید");
           setMessages(
-            (data.messages || []).map((m: { id: string; role: string; content: string; confidenceScore?: number; createdAt?: string }) => ({
+            (data.messages || []).map((m: { id: string; role: string; content: string; confidenceScore?: number; createdAt?: string; sources?: Message["sources"] }) => ({
               id: m.id,
               role: m.role as "user" | "assistant",
               content: m.content,
               confidenceScore: m.confidenceScore,
               createdAt: m.createdAt,
+              sources: m.sources,
             }))
           );
         }
@@ -82,6 +83,7 @@ export default function ChatConversationPage({ params }: { params: Promise<{ id:
             content: data.assistantMessage.content,
             confidenceScore: data.assistantMessage.confidenceScore,
             createdAt: data.assistantMessage.createdAt,
+            sources: data.assistantMessage.sources,
           },
         ]);
         

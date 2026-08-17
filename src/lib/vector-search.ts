@@ -1,4 +1,7 @@
-import { pool } from "@/db";
+import { and, eq, isNotNull } from "drizzle-orm";
+import { db } from "@/db";
+import { documentChunks, documents, knowledgeItems } from "@/db/schema";
+import { cosineSimilarity } from "@/lib/local-embeddings";
 
 export type SearchResult = {
   id: string;
@@ -13,58 +16,136 @@ export type SearchResult = {
   relevanceScore: number;
 };
 
-function vectorLiteral(vector: number[]) {
-  return `[${vector.map((value) => Number(value).toString()).join(",")}]`;
+function isVisible(
+  visibility: string | null | undefined,
+  rowDepartmentId: string | null | undefined,
+  rowOwnerId: string | null | undefined,
+  departmentId: string | null,
+  userId: string
+): boolean {
+  if (visibility === "organization") return true;
+  if (visibility === "department") return !!departmentId && rowDepartmentId === departmentId;
+  if (visibility === "private") return rowOwnerId === userId;
+  // Default to visible when visibility is not set (legacy rows).
+  return !visibility;
 }
 
-export async function searchDocuments(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 8): Promise<SearchResult[]> {
-  const result = await pool.query(
-    `SELECT c.id, c.document_id AS "documentId", c.content, d.title,
-            c.page_number AS "pageNumber", c.section, c.heading,
-            1 - (c.embedding <=> $1::vector) AS "relevanceScore"
-       FROM document_chunks c
-       JOIN documents d ON d.id = c.document_id
-      WHERE c.organization_id = $2
-        AND c.embedding IS NOT NULL
-        AND d.status = 'READY'
-        AND (d.visibility = 'organization' OR (d.visibility = 'department' AND d.department_id = $3) OR (d.visibility = 'private' AND d.owner_id = $4))
-      ORDER BY c.embedding <=> $1::vector
-      LIMIT $5`,
-    [vectorLiteral(queryEmbedding), organizationId, departmentId, userId, limit]
-  );
-  return result.rows.map((row) => ({ ...row, sourceType: "document" as const }));
+/**
+ * Vector search implemented entirely in application code (no pgvector /
+ * database extension required). Embeddings are stored as plain JSON number
+ * arrays; similarity is computed with cosine distance in JavaScript.
+ */
+export async function searchDocuments(
+  queryEmbedding: number[],
+  organizationId: string,
+  departmentId: string | null,
+  userId: string,
+  limit = 8
+): Promise<SearchResult[]> {
+  const rows = await db
+    .select({
+      id: documentChunks.id,
+      documentId: documentChunks.documentId,
+      content: documentChunks.content,
+      title: documents.title,
+      pageNumber: documentChunks.pageNumber,
+      section: documentChunks.section,
+      heading: documentChunks.heading,
+      embedding: documentChunks.embedding,
+      visibility: documents.visibility,
+      departmentId: documents.departmentId,
+      ownerId: documents.ownerId,
+    })
+    .from(documentChunks)
+    .innerJoin(documents, eq(documents.id, documentChunks.documentId))
+    .where(
+      and(
+        eq(documentChunks.organizationId, organizationId),
+        isNotNull(documentChunks.embedding),
+        eq(documents.status, "READY")
+      )
+    );
+
+  return rows
+    .filter((row) => isVisible(row.visibility, row.departmentId, row.ownerId, departmentId, userId))
+    .map((row) => ({
+      id: row.id,
+      documentId: row.documentId,
+      content: row.content,
+      title: row.title,
+      sourceType: "document" as const,
+      pageNumber: row.pageNumber,
+      section: row.section,
+      heading: row.heading,
+      relevanceScore: cosineSimilarity(queryEmbedding, (row.embedding as number[]) ?? []),
+    }))
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .slice(0, limit);
 }
 
-export async function searchKnowledge(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 4): Promise<SearchResult[]> {
-  const result = await pool.query(
-    `SELECT k.id, k.id AS "knowledgeId",
-            concat_ws('\n', k.title, k.subject, k.problem_description, k.action_taken, k.result, k.lesson_learned, k.suggestion) AS content,
-            k.title,
-            1 - (k.embedding <=> $1::vector) AS "relevanceScore"
-       FROM knowledge_items k
-      WHERE k.organization_id = $2
-        AND k.embedding IS NOT NULL
-        AND k.status = 'APPROVED'
-        AND (k.visibility = 'organization' OR (k.visibility = 'department' AND k.department_id = $3) OR (k.visibility = 'private' AND k.owner_id = $4))
-      ORDER BY k.embedding <=> $1::vector
-      LIMIT $5`,
-    [vectorLiteral(queryEmbedding), organizationId, departmentId, userId, limit]
-  );
-  return result.rows.map((row) => ({
-    ...row,
-    sourceType: "knowledge" as const,
-    pageNumber: null,
-    section: null,
-    heading: null,
-  }));
+export async function searchKnowledge(
+  queryEmbedding: number[],
+  organizationId: string,
+  departmentId: string | null,
+  userId: string,
+  limit = 4
+): Promise<SearchResult[]> {
+  const rows = await db
+    .select({
+      id: knowledgeItems.id,
+      title: knowledgeItems.title,
+      subject: knowledgeItems.subject,
+      problemDescription: knowledgeItems.problemDescription,
+      actionTaken: knowledgeItems.actionTaken,
+      result: knowledgeItems.result,
+      lessonLearned: knowledgeItems.lessonLearned,
+      suggestion: knowledgeItems.suggestion,
+      embedding: knowledgeItems.embedding,
+      visibility: knowledgeItems.visibility,
+      departmentId: knowledgeItems.departmentId,
+      ownerId: knowledgeItems.ownerId,
+    })
+    .from(knowledgeItems)
+    .where(
+      and(
+        eq(knowledgeItems.organizationId, organizationId),
+        isNotNull(knowledgeItems.embedding),
+        eq(knowledgeItems.status, "APPROVED")
+      )
+    );
+
+  return rows
+    .filter((row) => isVisible(row.visibility, row.departmentId, row.ownerId, departmentId, userId))
+    .map((row) => ({
+      id: row.id,
+      knowledgeId: row.id,
+      content: [row.title, row.subject, row.problemDescription, row.actionTaken, row.result, row.lessonLearned, row.suggestion]
+        .filter(Boolean)
+        .join("\n"),
+      title: row.title,
+      sourceType: "knowledge" as const,
+      pageNumber: null,
+      section: null,
+      heading: null,
+      relevanceScore: cosineSimilarity(queryEmbedding, (row.embedding as number[]) ?? []),
+    }))
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .slice(0, limit);
 }
 
-export async function cosineSearch(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 8): Promise<SearchResult[]> {
+export async function cosineSearch(
+  queryEmbedding: number[],
+  organizationId: string,
+  departmentId: string | null,
+  userId: string,
+  limit = 8
+): Promise<SearchResult[]> {
   const [docResults, knowledgeResults] = await Promise.all([
     searchDocuments(queryEmbedding, organizationId, departmentId, userId, limit),
     searchKnowledge(queryEmbedding, organizationId, departmentId, userId, Math.max(2, Math.ceil(limit / 2))),
   ]);
   return [...docResults, ...knowledgeResults]
-    .sort((a, b) => Number(b.relevanceScore) - Number(a.relevanceScore))
+    .filter((result) => result.relevanceScore > 0)
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .slice(0, limit);
 }

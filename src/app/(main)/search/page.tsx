@@ -10,11 +10,7 @@ import {
   FileText,
   Globe,
   Brain,
-  MessageSquare,
-  Filter,
-  Calendar,
   Building2,
-  Eye,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getRelativeTime } from "@/lib/persian-date";
@@ -41,51 +37,33 @@ export default function SearchPage() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const [activeFilter, setActiveFilter] = useState<string>("all");
+  const [error, setError] = useState("");
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
 
     setIsSearching(true);
-
-    // Simulate search
-    await new Promise((resolve) => setTimeout(resolve, 800));
-
-    setResults([
-      {
-        id: "1",
-        type: "document",
-        title: "دستورالعمل نگهداری تجهیزات صنعتی",
-        snippet: `... بازرسی دوره‌ای **${query}** باید هر 30 روز انجام شود. این فرآیند شامل بررسی وضعیت فیلترها، روان‌کارها و...`,
-        pageNumber: 12,
-        section: "بخش 3.4",
-        department: "واحد تولید",
-        relevanceScore: 0.92,
-        createdAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-      },
-      {
-        id: "2",
-        type: "knowledge",
-        title: "تجربه تعمیر پمپ فشار قوی",
-        snippet: `... با رعایت نکات مربوط به **${query}** توانستیم مشکل را در مدت کوتاهی برطرف کنیم...`,
-        department: "واحد نگهداری",
-        relevanceScore: 0.85,
-        createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-      },
-      {
-        id: "3",
-        type: "document",
-        title: "راهنمای ایمنی کارگاه",
-        snippet: `... استفاده از تجهیزات حفاظتی در هنگام کار با **${query}** الزامی است...`,
-        pageNumber: 5,
-        section: "فصل 2",
-        relevanceScore: 0.78,
-        createdAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
-      },
-    ]);
-
-    setIsSearching(false);
+    setError("");
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query.trim())}`);
+      if (res.ok) {
+        const data = await res.json();
+        setResults(data.results || []);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "خطا در جستجو");
+        setResults([]);
+      }
+    } catch {
+      setError("خطا در ارتباط با سرور");
+      setResults([]);
+    } finally {
+      setIsSearching(false);
+      setHasSearched(true);
+    }
   };
 
   const filteredResults =
@@ -128,9 +106,8 @@ export default function SearchPage() {
             <div className="flex gap-2">
               {[
                 { id: "all", label: "همه" },
-                { id: "document", label: "PDF" },
+                { id: "document", label: "اسناد" },
                 { id: "knowledge", label: "تجربیات" },
-                { id: "web", label: "وب" },
               ].map((filter) => (
                 <button
                   key={filter.id}
@@ -146,16 +123,12 @@ export default function SearchPage() {
                 </button>
               ))}
             </div>
-            <Button variant="outline" size="sm" className="gap-1">
-              <Building2 size={14} />
-              واحد
-            </Button>
-            <Button variant="outline" size="sm" className="gap-1">
-              <Calendar size={14} />
-              تاریخ
-            </Button>
           </div>
         </div>
+
+        {error && (
+          <p className="text-center text-red-400 text-sm mb-4">{error}</p>
+        )}
 
         {/* Results */}
         {results.length > 0 && (
@@ -166,19 +139,19 @@ export default function SearchPage() {
 
             <div className="space-y-4">
               {filteredResults.map((result) => (
-                <SearchResultCard key={result.id} result={result} />
+                <SearchResultCard key={`${result.type}-${result.id}`} result={result} />
               ))}
             </div>
           </div>
         )}
 
         {/* Empty State */}
-        {!isSearching && results.length === 0 && query && (
+        {!isSearching && hasSearched && results.length === 0 && !error && (
           <div className="text-center py-12">
             <Search size={48} className="mx-auto text-gray-600 mb-4" />
             <h3 className="text-white text-lg mb-2">نتیجه‌ای یافت نشد</h3>
             <p className="text-gray-500">
-              عبارت دیگری را جستجو کنید یا فیلترها را تغییر دهید
+              عبارت دیگری را جستجو کنید یا اسناد/تجربیات بیشتری ثبت کنید
             </p>
           </div>
         )}
@@ -192,7 +165,7 @@ function SearchResultCard({ result }: { result: SearchResult }) {
   const Icon = config.icon;
 
   return (
-    <Card className="p-5 hover:border-emerald-500/30 transition-all group cursor-pointer">
+    <Card className="p-5 hover:border-emerald-500/30 transition-all group">
       <div className="flex items-start gap-4">
         <div className={cn("p-2 rounded-lg", config.color)}>
           <Icon size={20} />
@@ -208,12 +181,7 @@ function SearchResultCard({ result }: { result: SearchResult }) {
             )}
           </div>
           <h3 className="text-white font-medium mb-2">{result.title}</h3>
-          <p
-            className="text-sm text-gray-400 line-clamp-2"
-            dangerouslySetInnerHTML={{
-              __html: result.snippet.replace(/\*\*(.*?)\*\*/g, '<mark class="bg-emerald-500/30 text-emerald-300 px-0.5 rounded">$1</mark>'),
-            }}
-          />
+          <p className="text-sm text-gray-400 line-clamp-2">{result.snippet}</p>
           <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
             {result.department && (
               <span className="flex items-center gap-1">
@@ -226,9 +194,9 @@ function SearchResultCard({ result }: { result: SearchResult }) {
               <div
                 className={cn(
                   "w-2 h-2 rounded-full",
-                  result.relevanceScore > 0.8
+                  result.relevanceScore > 0.5
                     ? "bg-emerald-400"
-                    : result.relevanceScore > 0.5
+                    : result.relevanceScore > 0.2
                     ? "bg-yellow-400"
                     : "bg-gray-400"
                 )}
@@ -236,16 +204,6 @@ function SearchResultCard({ result }: { result: SearchResult }) {
               {Math.round(result.relevanceScore * 100)}%
             </span>
           </div>
-        </div>
-        <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
-          <Button variant="ghost" size="sm" className="gap-1">
-            <Eye size={14} />
-            مشاهده
-          </Button>
-          <Button variant="ghost" size="sm" className="gap-1">
-            <MessageSquare size={14} />
-            چت
-          </Button>
         </div>
       </div>
     </Card>

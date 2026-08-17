@@ -2,25 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { documents } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { jwtVerify } from "jose";
-
-const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "change-this-to-random-64-char-string");
-
-async function getUser(request: NextRequest) {
-  const token = request.cookies.get("access_token")?.value;
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    return payload.userId as string;
-  } catch { return null; }
-}
+import { getCurrentUser } from "@/lib/auth-server";
+import { logEvent } from "@/lib/audit";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const userId = await getUser(request);
-  if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
+  const user = await getCurrentUser(request);
+  if (!user) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
 
   const { id } = await params;
   const [doc] = await db.select().from(documents).where(eq(documents.id, id)).limit(1);
@@ -33,11 +23,23 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const userId = await getUser(request);
-  if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
+  const user = await getCurrentUser(request);
+  if (!user) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
 
   const { id } = await params;
+  const [doc] = await db.select().from(documents).where(eq(documents.id, id)).limit(1);
   await db.delete(documents).where(eq(documents.id, id));
+
+  if (doc) {
+    await logEvent({
+      eventCode: "document.delete",
+      actorId: user.id,
+      resourceType: "document",
+      resourceId: doc.id,
+      resourceName: doc.title,
+      request,
+    });
+  }
 
   return NextResponse.json({ success: true });
 }
