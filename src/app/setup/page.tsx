@@ -27,7 +27,6 @@ export default function SetupPage() {
   const [passwordStrength, setPasswordStrength] = useState(0);
 
   useEffect(() => {
-    // Check setup status
     async function checkStatus() {
       const res = await fetch("/api/setup/status");
       const data = await res.json();
@@ -39,7 +38,6 @@ export default function SetupPage() {
   }, [router]);
 
   useEffect(() => {
-    // Calculate password strength
     const password = formData.password;
     let strength = 0;
     if (password.length >= 8) strength += 25;
@@ -81,7 +79,6 @@ export default function SetupPage() {
       return;
     }
 
-    // Final step - submit
     setIsLoading(true);
     try {
       const res = await fetch("/api/setup/init", {
@@ -107,7 +104,7 @@ export default function SetupPage() {
       setTimeout(() => {
         router.push("/login");
       }, 2000);
-    } catch (err) {
+    } catch {
       setError("خطا در ارتباط با سرور");
     } finally {
       setIsLoading(false);
@@ -130,7 +127,7 @@ export default function SetupPage() {
   if (success) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4 bg-[#0B0F0E]">
-        <div className="text-center animate-scale-in">
+        <div className="text-center">
           <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-emerald-500/20 mb-6">
             <CheckCircle className="h-10 w-10 text-emerald-400" />
           </div>
@@ -154,7 +151,7 @@ export default function SetupPage() {
         />
       </div>
 
-      <Card className="w-full max-w-lg relative animate-fade-in">
+      <Card className="w-full max-w-lg relative">
         <CardHeader className="text-center pb-2">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 mx-auto mb-4">
             <Bot size={32} className="text-white" />
@@ -167,7 +164,6 @@ export default function SetupPage() {
         </CardHeader>
 
         <CardContent>
-          {/* Progress */}
           <div className="mb-8">
             <div className="flex justify-between text-sm text-gray-400 mb-2">
               <span>مرحله {step} از ۳</span>
@@ -178,7 +174,7 @@ export default function SetupPage() {
 
           <form onSubmit={handleSubmit} className="space-y-5">
             {step === 1 && (
-              <div className="space-y-5 animate-slide-up">
+              <div className="space-y-5">
                 <h3 className="text-lg font-medium text-white mb-4">اطلاعات مدیر سیستم</h3>
                 <Input
                   label="نام کامل"
@@ -200,7 +196,7 @@ export default function SetupPage() {
             )}
 
             {step === 2 && (
-              <div className="space-y-5 animate-slide-up">
+              <div className="space-y-5">
                 <h3 className="text-lg font-medium text-white mb-4">اطلاعات ورود</h3>
                 <Input
                   label="نام کاربری"
@@ -244,7 +240,7 @@ export default function SetupPage() {
             )}
 
             {step === 3 && (
-              <div className="space-y-5 animate-slide-up">
+              <div className="space-y-5">
                 <h3 className="text-lg font-medium text-white mb-4">اطلاعات سازمان</h3>
                 <Input
                   label="نام سازمان (اختیاری)"
@@ -266,7 +262,7 @@ export default function SetupPage() {
             )}
 
             {error && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-400 text-sm animate-shake">
+              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-400 text-sm">
                 {error}
               </div>
             )}

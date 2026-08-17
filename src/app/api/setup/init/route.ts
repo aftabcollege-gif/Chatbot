@@ -2,14 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { users, organizations, roles, userRoles, permissions, rolePermissions, setupStatus } from "@/db/schema";
 import bcrypt from "bcryptjs";
-import { eq } from "drizzle-orm";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { name, email, username, password, organizationName } = body;
 
-    // Validate input
     if (!name || !email || !username || !password) {
       return NextResponse.json(
         { error: "تمام فیلدها الزامی است" },
@@ -24,7 +22,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if setup already completed
     const existingUsers = await db.select().from(users).limit(1);
     if (existingUsers.length > 0) {
       return NextResponse.json(
@@ -33,7 +30,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create organization
     const [org] = await db
       .insert(organizations)
       .values({
@@ -43,7 +39,6 @@ export async function POST(request: NextRequest) {
       })
       .returning();
 
-    // Create default permissions
     const permissionCodes = [
       { code: "chat.create", description: "ایجاد گفتگو" },
       { code: "chat.read", description: "مشاهده گفتگوها" },
@@ -64,7 +59,6 @@ export async function POST(request: NextRequest) {
       .values(permissionCodes)
       .returning();
 
-    // Create default roles
     const [adminRole] = await db
       .insert(roles)
       .values({
@@ -85,7 +79,6 @@ export async function POST(request: NextRequest) {
       })
       .returning();
 
-    // Assign all permissions to admin role
     await db.insert(rolePermissions).values(
       insertedPermissions.map((p) => ({
         roleId: adminRole.id,
@@ -93,7 +86,6 @@ export async function POST(request: NextRequest) {
       }))
     );
 
-    // Assign basic permissions to user role
     const userPermissions = insertedPermissions.filter((p) =>
       ["chat.create", "chat.read", "documents.read", "knowledge.read"].includes(p.code)
     );
@@ -104,7 +96,6 @@ export async function POST(request: NextRequest) {
       }))
     );
 
-    // Create admin user
     const passwordHash = await bcrypt.hash(password, 12);
     const [adminUser] = await db
       .insert(users)
@@ -124,13 +115,11 @@ export async function POST(request: NextRequest) {
       })
       .returning();
 
-    // Assign admin role to user
     await db.insert(userRoles).values({
       userId: adminUser.id,
       roleId: adminRole.id,
     });
 
-    // Mark setup as completed
     await db
       .insert(setupStatus)
       .values({

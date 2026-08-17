@@ -68,3 +68,8 @@ export async function createEmbeddings(inputs: string[]) {
   }
   return items.map((item) => item.embedding!);
 }
+
+/** Check if AI provider is configured */
+export function isAIConfigured(): boolean {
+  return !!(process.env.AI_BASE_URL?.trim());
+}

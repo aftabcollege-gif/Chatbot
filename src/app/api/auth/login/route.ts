@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { users, organizations, roles, userRoles, sessions } from "@/db/schema";
+import { users, roles, userRoles, sessions } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { SignJWT } from "jose";
@@ -23,47 +23,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Find user by username or email
-    const [user] = await db
+    let [user] = await db
       .select()
       .from(users)
       .where(eq(users.username, username))
       .limit(1);
 
     if (!user) {
-      // Try email
-      const [userByEmail] = await db
+      [user] = await db
         .select()
         .from(users)
         .where(eq(users.email, username))
         .limit(1);
-      
-      if (!userByEmail) {
-        return NextResponse.json(
-          { error: "نام کاربری یا رمز عبور اشتباه است" },
-          { status: 401 }
-        );
-      }
-      
-      // Check password
-      const isValid = await bcrypt.compare(password, userByEmail.passwordHash);
-      if (!isValid) {
-        return NextResponse.json(
-          { error: "نام کاربری یا رمز عبور اشتباه است" },
-          { status: 401 }
-        );
-      }
-
-      if (!userByEmail.isActive) {
-        return NextResponse.json(
-          { error: "حساب کاربری غیرفعال است" },
-          { status: 403 }
-        );
-      }
-
-      return await createSession(userByEmail, request);
     }
 
-    // Check password
+    if (!user) {
+      return NextResponse.json(
+        { error: "نام کاربری یا رمز عبور اشتباه است" },
+        { status: 401 }
+      );
+    }
+
     const isValid = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) {
       return NextResponse.json(
@@ -90,7 +70,6 @@ export async function POST(request: NextRequest) {
 }
 
 async function createSession(user: typeof users.$inferSelect, request: NextRequest) {
-  // Get user roles
   const userRolesList = await db
     .select({ role: roles })
     .from(userRoles)
@@ -99,7 +78,6 @@ async function createSession(user: typeof users.$inferSelect, request: NextReque
 
   const roleName = userRolesList[0]?.role.name || (user.isSuperadmin ? "admin" : "user");
 
-  // Create access token
   const accessToken = await new SignJWT({
     userId: user.id,
     email: user.email,
@@ -110,12 +88,10 @@ async function createSession(user: typeof users.$inferSelect, request: NextReque
     .setIssuedAt()
     .sign(JWT_SECRET);
 
-  // Create refresh token
   const refreshToken = uuidv4();
   const refreshTokenHash = await bcrypt.hash(refreshToken, 10);
 
-  // Save session
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   await db.insert(sessions).values({
     userId: user.id,
     refreshTokenHash,
@@ -124,7 +100,6 @@ async function createSession(user: typeof users.$inferSelect, request: NextReque
     expiresAt,
   });
 
-  // Update last login
   await db
     .update(users)
     .set({ lastLogin: new Date() })
@@ -150,7 +125,6 @@ async function createSession(user: typeof users.$inferSelect, request: NextReque
     expiresIn: 3600,
   });
 
-  // Set cookies
   response.cookies.set("access_token", accessToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",

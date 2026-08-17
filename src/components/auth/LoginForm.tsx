@@ -49,11 +49,10 @@ export function LoginForm() {
 
   return (
     <div className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden">
-      {/* Animated Background */}
       <div className="absolute inset-0 bg-gradient-to-br from-[#0B0F0E] via-[#111715] to-[#0B0F0E]">
         <div className="absolute inset-0 opacity-30">
           <div
-            className="absolute w-[600px] h-[600px] rounded-full animate-gradient"
+            className="absolute w-[600px] h-[600px] rounded-full"
             style={{
               background: "radial-gradient(circle, rgba(16,185,129,0.15) 0%, transparent 70%)",
               top: "-200px",
@@ -61,27 +60,24 @@ export function LoginForm() {
             }}
           />
           <div
-            className="absolute w-[500px] h-[500px] rounded-full animate-gradient"
+            className="absolute w-[500px] h-[500px] rounded-full"
             style={{
               background: "radial-gradient(circle, rgba(5,150,105,0.1) 0%, transparent 70%)",
               bottom: "-150px",
               left: "-150px",
-              animationDelay: "2s",
             }}
           />
         </div>
       </div>
 
-      {/* Login Card */}
       <div
-        className={`relative w-full max-w-md animate-scale-in ${
-          shake ? "animate-shake" : ""
+        className={`relative w-full max-w-md ${
+          shake ? "animate-pulse" : ""
         }`}
       >
-        <div className="glass-strong rounded-3xl p-8 shadow-2xl">
-          {/* Logo */}
+        <div className="bg-[#111715] border border-white/10 rounded-3xl p-8 shadow-2xl">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 animate-pulse-glow mb-4">
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 mb-4">
               <Bot size={40} className="text-white" />
             </div>
             <h1 className="text-2xl font-bold text-white mb-2">
@@ -93,7 +89,6 @@ export function LoginForm() {
             </p>
           </div>
 
-          {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-5">
             <Input
               type="text"
@@ -101,7 +96,6 @@ export function LoginForm() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               icon={<User size={20} />}
-              error={error && !password ? " " : undefined}
               autoFocus
               required
             />
@@ -124,7 +118,6 @@ export function LoginForm() {
             </Button>
           </form>
 
-          {/* Footer */}
           <div className="mt-8 text-center">
             <p className="text-sm text-gray-500">
               نسخه ۱.۰.۰ • Enterprise AI Platform

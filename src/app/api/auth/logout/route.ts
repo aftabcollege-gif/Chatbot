@@ -16,8 +16,6 @@ export async function POST(request: NextRequest) {
       try {
         const { payload } = await jwtVerify(token, JWT_SECRET);
         const userId = payload.userId as string;
-        
-        // Delete all sessions for user
         await db.delete(sessions).where(eq(sessions.userId, userId));
       } catch {
         // Token invalid, just clear cookies

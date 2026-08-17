@@ -74,7 +74,7 @@ function ToastContainer({ toasts, removeToast }: { toasts: Toast[]; removeToast:
         <div
           key={toast.id}
           className={cn(
-            "pointer-events-auto flex items-start gap-3 rounded-xl border p-4 shadow-lg backdrop-blur-sm animate-slide-down min-w-[300px] max-w-[400px]",
+            "pointer-events-auto flex items-start gap-3 rounded-xl border p-4 shadow-lg backdrop-blur-sm min-w-[300px] max-w-[400px]",
             bgColors[toast.type]
           )}
         >

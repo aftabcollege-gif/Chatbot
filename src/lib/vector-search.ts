@@ -17,7 +17,7 @@ function vectorLiteral(vector: number[]) {
   return `[${vector.map((value) => Number(value).toString()).join(",")}]`;
 }
 
-export async function searchDocuments(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 8) {
+export async function searchDocuments(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 8): Promise<SearchResult[]> {
   const result = await pool.query(
     `SELECT c.id, c.document_id AS "documentId", c.content, d.title,
             c.page_number AS "pageNumber", c.section, c.heading,
@@ -35,7 +35,7 @@ export async function searchDocuments(queryEmbedding: number[], organizationId: 
   return result.rows.map((row) => ({ ...row, sourceType: "document" as const }));
 }
 
-export async function searchKnowledge(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 4) {
+export async function searchKnowledge(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 4): Promise<SearchResult[]> {
   const result = await pool.query(
     `SELECT k.id, k.id AS "knowledgeId",
             concat_ws('\n', k.title, k.subject, k.problem_description, k.action_taken, k.result, k.lesson_learned, k.suggestion) AS content,
@@ -59,12 +59,12 @@ export async function searchKnowledge(queryEmbedding: number[], organizationId: 
   }));
 }
 
-export async function cosineSearch(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 8) {
-  const [documents, knowledge] = await Promise.all([
+export async function cosineSearch(queryEmbedding: number[], organizationId: string, departmentId: string | null, userId: string, limit = 8): Promise<SearchResult[]> {
+  const [docResults, knowledgeResults] = await Promise.all([
     searchDocuments(queryEmbedding, organizationId, departmentId, userId, limit),
     searchKnowledge(queryEmbedding, organizationId, departmentId, userId, Math.max(2, Math.ceil(limit / 2))),
   ]);
-  return [...documents, ...knowledge]
+  return [...docResults, ...knowledgeResults]
     .sort((a, b) => Number(b.relevanceScore) - Number(a.relevanceScore))
     .slice(0, limit);
 }

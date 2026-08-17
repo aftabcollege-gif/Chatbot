@@ -35,7 +35,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get user roles
     const userRolesList = await db
       .select({ role: roles })
       .from(userRoles)

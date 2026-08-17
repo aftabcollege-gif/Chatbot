@@ -1,4 +1,43 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";import { jwtVerify } from "jose";import { db } from "@/db";import { knowledgeItems,users } from "@/db/schema";
-const SECRET=new TextEncoder().encode(process.env.JWT_SECRET||"change-this-to-random-64-char-string");async function uid(r:NextRequest){const t=r.cookies.get("access_token")?.value;if(!t)return null;try{const {payload}=await jwtVerify(t,SECRET);return payload.userId as string}catch{return null}}
-export async function PATCH(r:NextRequest,{params}:{params:Promise<{id:string}>}){const userId=await uid(r);if(!userId)return NextResponse.json({error:"غیر مجاز"},{status:401});const {id}=await params;const [u]=await db.select().from(users).where(eq(users.id,userId)).limit(1);if(!u?.organizationId)return NextResponse.json({error:"کاربر نامعتبر"},{status:400});const [item]=await db.select().from(knowledgeItems).where(and(eq(knowledgeItems.id,id),eq(knowledgeItems.organizationId,u.organizationId))).limit(1);if(!item)return NextResponse.json({error:"دانش یافت نشد"},{status:404});const b=await r.json();const status=String(b.status||"").toUpperCase();if(!["DRAFT","APPROVED","REJECTED"].includes(status))return NextResponse.json({error:"وضعیت نامعتبر"},{status:400});if(status==="APPROVED"&&!u.isSuperadmin)return NextResponse.json({error:"اجازه تأیید ندارید"},{status:403});const [updated]=await db.update(knowledgeItems).set({status,reviewedBy:u.id,reviewedAt:new Date(),approvedBy:status==="APPROVED"?u.id:null,approvedAt:status==="APPROVED"?new Date():null,publishedAt:status==="APPROVED"?new Date():null,updatedAt:new Date()}).where(eq(knowledgeItems.id,id)).returning();return NextResponse.json({item:updated})}
+import { db } from "@/db";
+import { knowledgeItems } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { jwtVerify } from "jose";
+
+const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "change-this-to-random-64-char-string");
+
+async function getUser(request: NextRequest) {
+  const token = request.cookies.get("access_token")?.value;
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, JWT_SECRET);
+    return payload.userId as string;
+  } catch { return null; }
+}
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const userId = await getUser(request);
+  if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
+
+  const { id } = await params;
+  const [item] = await db.select().from(knowledgeItems).where(eq(knowledgeItems.id, id)).limit(1);
+  if (!item) return NextResponse.json({ error: "تجربه یافت نشد" }, { status: 404 });
+
+  return NextResponse.json({ item });
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const userId = await getUser(request);
+  if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
+
+  const { id } = await params;
+  await db.delete(knowledgeItems).where(eq(knowledgeItems.id, id));
+
+  return NextResponse.json({ success: true });
+}

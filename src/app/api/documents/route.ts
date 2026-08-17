@@ -1,11 +1,7 @@
-import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { documents, documentChunks, users } from "@/db/schema";
-import { extractText } from "@/lib/extract-text";
-import { splitIntoChunks } from "@/lib/chunking";
-import { createEmbeddings } from "@/lib/ai";
+import { documents, users } from "@/db/schema";
 import { jwtVerify } from "jose";
 
 const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "change-this-to-random-64-char-string");
@@ -22,7 +18,11 @@ async function getUser(request: NextRequest) {
 export async function GET(request: NextRequest) {
   const userId = await getUser(request);
   if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
-  const rows = await db.select().from(documents).where(eq(documents.ownerId, userId)).orderBy(documents.createdAt);
+  
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user?.organizationId) return NextResponse.json({ items: [] });
+
+  const rows = await db.select().from(documents).where(eq(documents.organizationId, user.organizationId)).orderBy(documents.createdAt);
   return NextResponse.json({ items: rows });
 }
 
@@ -41,15 +41,19 @@ export async function POST(request: NextRequest) {
     const [owner] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!owner?.organizationId) return NextResponse.json({ error: "سازمان کاربر مشخص نیست" }, { status: 400 });
 
+    const { createHash } = await import("node:crypto");
     const buffer = Buffer.from(await file.arrayBuffer());
     const hash = createHash("sha256").update(buffer).digest("hex");
-    const [existing] = await db.select().from(documents).where(and(eq(documents.organizationId, owner.organizationId), eq(documents.fileHash, hash))).limit(1);
-    if (existing) return NextResponse.json({ error: "این فایل قبلاً ثبت شده است", document: existing }, { status: 409 });
 
+    const { extractText } = await import("@/lib/extract-text");
     const text = (await extractText(buffer, file.type || file.name)).trim();
     if (!text) return NextResponse.json({ error: "متن قابل استخراج از فایل پیدا نشد" }, { status: 422 });
+
+    const { splitIntoChunks } = await import("@/lib/chunking");
     const chunks = splitIntoChunks(text);
     if (!chunks.length) return NextResponse.json({ error: "فایل محتوای متنی قابل پردازش ندارد" }, { status: 422 });
+
+    const { documentChunks } = await import("@/db/schema");
 
     const [document] = await db.insert(documents).values({
       organizationId: owner.organizationId,
@@ -69,12 +73,32 @@ export async function POST(request: NextRequest) {
     }).returning();
 
     try {
-      const batchSize = 32;
-      const rows: typeof documentChunks.$inferInsert[] = [];
-      for (let i = 0; i < chunks.length; i += batchSize) {
-        const batch = chunks.slice(i, i + batchSize);
-        const embeddings = await createEmbeddings(batch.map((item) => item.content));
-        rows.push(...batch.map((item, j) => ({
+      const { isAIConfigured, createEmbeddings } = await import("@/lib/ai");
+      
+      const rows: (typeof documentChunks.$inferInsert)[] = [];
+      
+      if (isAIConfigured()) {
+        const batchSize = 32;
+        for (let i = 0; i < chunks.length; i += batchSize) {
+          const batch = chunks.slice(i, i + batchSize);
+          const embeddings = await createEmbeddings(batch.map((item) => item.content));
+          rows.push(...batch.map((item, j) => ({
+            documentId: document.id,
+            organizationId: owner.organizationId!,
+            departmentId: owner.departmentId,
+            chunkIndex: item.chunkIndex,
+            content: item.content,
+            contentNormalized: item.content.toLowerCase(),
+            sourceType: "document",
+            visibility: "organization",
+            tokenCount: Math.ceil(item.content.length / 4),
+            embedding: embeddings[j],
+            metadata: {},
+          })));
+        }
+      } else {
+        // Store chunks without embeddings
+        rows.push(...chunks.map((item) => ({
           documentId: document.id,
           organizationId: owner.organizationId!,
           departmentId: owner.departmentId,
@@ -84,11 +108,10 @@ export async function POST(request: NextRequest) {
           sourceType: "document",
           visibility: "organization",
           tokenCount: Math.ceil(item.content.length / 4),
-          embedding: embeddings[j],
           metadata: {},
         })));
-        await db.update(documents).set({ processingProgress: Math.min(95, Math.round(((i + batch.length) / chunks.length) * 85) + 10) }).where(eq(documents.id, document.id));
       }
+
       await db.insert(documentChunks).values(rows);
       const [ready] = await db.update(documents).set({ status: "READY", processingProgress: 100, updatedAt: new Date() }).where(eq(documents.id, document.id)).returning();
       return NextResponse.json({ document: ready, chunks: rows.length }, { status: 201 });

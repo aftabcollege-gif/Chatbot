@@ -4,7 +4,6 @@ import React, { useState, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { Sidebar } from "./Sidebar";
-import { TopBar } from "./TopBar";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
 
@@ -18,7 +17,7 @@ interface Conversation {
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
@@ -63,7 +62,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // Extract conversation ID from path
   const conversationId = pathname.startsWith("/chat/")
     ? pathname.split("/")[2]
     : undefined;

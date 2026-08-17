@@ -1,143 +1,97 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/shared/EmptyState";
-import {
-  Brain,
-  Plus,
-  Search,
-  Filter,
-  Clock,
-  User,
-  Tag,
-  CheckCircle,
-  AlertCircle,
-  Archive,
-  Eye,
-  Edit3,
-  Building2,
-} from "lucide-react";
+import { Brain, Plus, Search, Clock, User, Tag, Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getRelativeTime } from "@/lib/persian-date";
 
-interface KnowledgeItem {
+interface KnowledgeItemData {
   id: string;
   title: string;
-  subject: string;
-  department: string;
-  owner: string;
-  summary: string;
-  status: "DRAFT" | "PENDING" | "APPROVED" | "PUBLISHED" | "ARCHIVED";
-  result: "success" | "partial" | "failure";
-  tags: string[];
-  updatedAt: string;
+  subject: string | null;
+  problemDescription: string;
+  actionTaken: string;
+  result: string | null;
+  lessonLearned: string;
+  status: string;
+  visibility: string | null;
+  createdAt: string;
 }
 
-const mockKnowledge: KnowledgeItem[] = [
-  {
-    id: "1",
-    title: "علت خرابی مکرر پمپ شماره 4",
-    subject: "تعمیرات",
-    department: "واحد تولید",
-    owner: "علی رضایی",
-    summary: "با تغییر فیلتر هر 30 روز به جای 60 روز، مشکل خرابی پمپ برطرف شد",
-    status: "PUBLISHED",
-    result: "success",
-    tags: ["پمپ", "نگهداری", "تجهیزات"],
-    updatedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "2",
-    title: "بهینه‌سازی فرآیند بسته‌بندی",
-    subject: "بهبود فرآیند",
-    department: "واحد بسته‌بندی",
-    owner: "مریم احمدی",
-    summary: "با تغییر چیدمان خط بسته‌بندی، 15% افزایش سرعت حاصل شد",
-    status: "APPROVED",
-    result: "success",
-    tags: ["بسته‌بندی", "بهینه‌سازی"],
-    updatedAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "3",
-    title: "مشکل کیفیت محصول در دمای بالا",
-    subject: "کیفیت",
-    department: "واحد کیفیت",
-    owner: "حسن کریمی",
-    summary: "در دمای بالای 35 درجه، کیفیت محصول افت می‌کند",
-    status: "PENDING",
-    result: "partial",
-    tags: ["کیفیت", "دما"],
-    updatedAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-  },
-];
-
-const statusConfig = {
-  DRAFT: { label: "پیش‌نویس", variant: "secondary" as const },
-  PENDING: { label: "در انتظار تأیید", variant: "warning" as const },
-  APPROVED: { label: "تأیید شده", variant: "info" as const },
-  PUBLISHED: { label: "منتشر شده", variant: "success" as const },
-  ARCHIVED: { label: "آرشیو", variant: "secondary" as const },
-};
-
-const resultConfig = {
-  success: { label: "موفق", color: "text-emerald-400" },
-  partial: { label: "جزئی", color: "text-yellow-400" },
-  failure: { label: "ناموفق", color: "text-red-400" },
+const statusConfig: Record<string, { label: string; variant: "secondary" | "warning" | "info" | "success" }> = {
+  DRAFT: { label: "پیش‌نویس", variant: "secondary" },
+  PENDING: { label: "در انتظار تأیید", variant: "warning" },
+  APPROVED: { label: "تأیید شده", variant: "info" },
+  PUBLISHED: { label: "منتشر شده", variant: "success" },
 };
 
 const tabs = [
   { id: "all", label: "همه" },
-  { id: "PENDING", label: "در انتظار تأیید" },
+  { id: "DRAFT", label: "پیش‌نویس" },
   { id: "APPROVED", label: "تأیید شده" },
   { id: "PUBLISHED", label: "منتشر شده" },
-  { id: "ARCHIVED", label: "آرشیو" },
 ];
 
 export default function KnowledgePage() {
   const [activeTab, setActiveTab] = useState("all");
+  const [items, setItems] = useState<KnowledgeItemData[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const filteredKnowledge =
-    activeTab === "all"
-      ? mockKnowledge
-      : mockKnowledge.filter((k) => k.status === activeTab);
+  useEffect(() => {
+    fetchItems();
+  }, []);
+
+  const fetchItems = async () => {
+    try {
+      const res = await fetch("/api/knowledge");
+      if (res.ok) {
+        const data = await res.json();
+        setItems(data.items || []);
+      }
+    } catch (error) {
+      console.error("Error:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredItems = items
+    .filter((k) => activeTab === "all" || k.status === activeTab)
+    .filter((k) => !searchQuery || k.title.includes(searchQuery) || k.problemDescription.includes(searchQuery));
 
   return (
     <div className="min-h-screen flex flex-col">
       <TopBar title="دانش سازمانی" />
 
       <div className="flex-1 p-6">
-        {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
             <div className="relative">
-              <Search
-                size={18}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"
-              />
+              <Search size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type="text"
                 placeholder="جستجو در تجربیات..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-4 pr-10 py-2 bg-[#17211D] border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500/50 w-64"
               />
             </div>
-            <Button variant="outline" className="gap-2">
-              <Filter size={16} />
-              فیلتر
-            </Button>
           </div>
-          <Button className="gap-2" onClick={() => setShowForm(true)}>
+          <Button className="gap-2" onClick={() => setShowForm(!showForm)}>
             <Plus size={18} />
             ثبت تجربه جدید
           </Button>
         </div>
 
-        {/* Tabs */}
+        {showForm && <KnowledgeForm onSubmit={() => { setShowForm(false); fetchItems(); }} onCancel={() => setShowForm(false)} />}
+
         <div className="flex gap-2 mb-6 border-b border-white/10 pb-3">
           {tabs.map((tab) => (
             <button
@@ -155,8 +109,9 @@ export default function KnowledgePage() {
           ))}
         </div>
 
-        {/* Knowledge List */}
-        {filteredKnowledge.length === 0 ? (
+        {loading ? (
+          <div className="text-center py-12 text-gray-400">در حال بارگذاری...</div>
+        ) : filteredItems.length === 0 ? (
           <EmptyState
             icon={<Brain size={40} />}
             title="تجربه‌ای یافت نشد"
@@ -168,7 +123,7 @@ export default function KnowledgePage() {
           />
         ) : (
           <div className="space-y-4">
-            {filteredKnowledge.map((item) => (
+            {filteredItems.map((item) => (
               <KnowledgeCard key={item.id} item={item} />
             ))}
           </div>
@@ -178,12 +133,11 @@ export default function KnowledgePage() {
   );
 }
 
-function KnowledgeCard({ item }: { item: KnowledgeItem }) {
-  const status = statusConfig[item.status];
-  const result = resultConfig[item.result];
+function KnowledgeCard({ item }: { item: KnowledgeItemData }) {
+  const status = statusConfig[item.status] || statusConfig.DRAFT;
 
   return (
-    <Card className="p-5 hover:border-emerald-500/30 transition-all group">
+    <Card className="p-5 hover:border-emerald-500/30 transition-all">
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-lg bg-emerald-500/20">
@@ -192,57 +146,106 @@ function KnowledgeCard({ item }: { item: KnowledgeItem }) {
           <div>
             <h3 className="text-white font-medium">{item.title}</h3>
             <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
+              {item.subject && (
+                <span className="flex items-center gap-1">
+                  <Tag size={12} />
+                  {item.subject}
+                </span>
+              )}
               <span className="flex items-center gap-1">
-                <Building2 size={12} />
-                {item.department}
-              </span>
-              <span className="flex items-center gap-1">
-                <Tag size={12} />
-                {item.subject}
-              </span>
-              <span className="flex items-center gap-1">
-                <User size={12} />
-                {item.owner}
+                <Clock size={12} />
+                {getRelativeTime(item.createdAt)}
               </span>
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={status.variant}>{status.label}</Badge>
-          <span className={cn("text-sm", result.color)}>{result.label}</span>
-        </div>
+        <Badge variant={status.variant}>{status.label}</Badge>
       </div>
-
-      <p className="text-gray-400 text-sm mb-4">{item.summary}</p>
-
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 flex-wrap">
-          {item.tags.map((tag) => (
-            <span
-              key={tag}
-              className="px-2 py-0.5 bg-white/5 rounded-md text-xs text-gray-400"
-            >
-              {tag}
-            </span>
-          ))}
+      <p className="text-sm text-gray-400 line-clamp-2">{item.problemDescription}</p>
+      {item.lessonLearned && (
+        <div className="mt-3 p-3 bg-emerald-500/5 rounded-lg border border-emerald-500/10">
+          <p className="text-xs text-emerald-400 mb-1">درس‌آموخته:</p>
+          <p className="text-sm text-gray-300 line-clamp-2">{item.lessonLearned}</p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-500 flex items-center gap-1">
-            <Clock size={12} />
-            {getRelativeTime(item.updatedAt)}
-          </span>
-          <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-            <Button variant="ghost" size="sm" className="gap-1">
-              <Eye size={14} />
-              مشاهده
-            </Button>
-            <Button variant="ghost" size="sm" className="gap-1">
-              <Edit3 size={14} />
-              ویرایش
-            </Button>
-          </div>
+      )}
+    </Card>
+  );
+}
+
+function KnowledgeForm({ onSubmit, onCancel }: { onSubmit: () => void; onCancel: () => void }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({
+    title: "",
+    subject: "",
+    problemDescription: "",
+    actionTaken: "",
+    result: "",
+    lessonLearned: "",
+    suggestion: "",
+  });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
+      });
+      if (res.ok) {
+        onSubmit();
+      } else {
+        const data = await res.json();
+        setError(data.error || "خطا");
+      }
+    } catch {
+      setError("خطا در ارتباط با سرور");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Card className="p-6 mb-6">
+      <h3 className="text-lg font-semibold text-white mb-4">ثبت تجربه جدید</h3>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">عنوان *</label>
+          <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" required />
         </div>
-      </div>
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">موضوع</label>
+          <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" />
+        </div>
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">شرح مسئله *</label>
+          <textarea value={form.problemDescription} onChange={(e) => setForm({ ...form, problemDescription: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50 min-h-[80px]" required />
+        </div>
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">اقدام انجام‌شده *</label>
+          <textarea value={form.actionTaken} onChange={(e) => setForm({ ...form, actionTaken: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50 min-h-[80px]" required />
+        </div>
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">نتیجه</label>
+          <input value={form.result} onChange={(e) => setForm({ ...form, result: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" />
+        </div>
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">درس‌آموخته *</label>
+          <textarea value={form.lessonLearned} onChange={(e) => setForm({ ...form, lessonLearned: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50 min-h-[80px]" required />
+        </div>
+        <div>
+          <label className="text-sm text-gray-400 mb-1 block">پیشنهاد</label>
+          <textarea value={form.suggestion} onChange={(e) => setForm({ ...form, suggestion: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" />
+        </div>
+        {error && <p className="text-red-400 text-sm">{error}</p>}
+        <div className="flex gap-3">
+          <Button type="submit" loading={loading}>ثبت تجربه</Button>
+          <Button type="button" variant="outline" onClick={onCancel}>انصراف</Button>
+        </div>
+      </form>
     </Card>
   );
 }

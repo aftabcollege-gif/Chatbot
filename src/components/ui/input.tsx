@@ -20,6 +20,10 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
 
     React.useImperativeHandle(ref, () => inputRef.current!);
 
+    React.useEffect(() => {
+      setHasValue(!!props.value);
+    }, [props.value]);
+
     const isPassword = type === "password";
     const inputType = isPassword && showPassword ? "text" : type;
 
@@ -92,8 +96,8 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
             </span>
           )}
         </div>
-        {error && (
-          <p className="mt-2 text-sm text-red-400 animate-slide-up flex items-center gap-1">
+        {error && error.trim() && (
+          <p className="mt-2 text-sm text-red-400 flex items-center gap-1">
             <AlertCircle size={14} />
             {error}
           </p>

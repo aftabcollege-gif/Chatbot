@@ -3,7 +3,6 @@
 import React from "react";
 import { useRouter } from "next/navigation";
 import { TopBar } from "@/components/layout/TopBar";
-import { EmptyState } from "@/components/shared/EmptyState";
 import { Button } from "@/components/ui/button";
 import { MessageSquarePlus, Bot, FileText, Brain, Sparkles } from "lucide-react";
 
@@ -32,8 +31,7 @@ export default function ChatPage() {
 
       <div className="flex-1 flex items-center justify-center p-8">
         <div className="max-w-2xl text-center">
-          {/* Logo */}
-          <div className="inline-flex items-center justify-center w-24 h-24 rounded-3xl bg-gradient-to-br from-emerald-500 to-emerald-600 mb-8 animate-pulse-glow">
+          <div className="inline-flex items-center justify-center w-24 h-24 rounded-3xl bg-gradient-to-br from-emerald-500 to-emerald-600 mb-8">
             <Bot size={48} className="text-white" />
           </div>
 
@@ -44,34 +42,27 @@ export default function ChatPage() {
             از من هر سؤالی درباره اسناد، دستورالعمل‌ها و تجربیات سازمانی بپرسید
           </p>
 
-          {/* Features */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
             <div className="p-4 bg-[#17211D] rounded-xl border border-white/10">
               <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center mx-auto mb-3">
                 <FileText size={20} className="text-blue-400" />
               </div>
               <h3 className="text-white font-medium mb-1">اسناد سازمانی</h3>
-              <p className="text-sm text-gray-500">
-                پاسخ بر اساس اسناد معتبر
-              </p>
+              <p className="text-sm text-gray-500">پاسخ بر اساس اسناد معتبر</p>
             </div>
             <div className="p-4 bg-[#17211D] rounded-xl border border-white/10">
               <div className="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center mx-auto mb-3">
                 <Brain size={20} className="text-emerald-400" />
               </div>
               <h3 className="text-white font-medium mb-1">تجربیات</h3>
-              <p className="text-sm text-gray-500">
-                دسترسی به دانش همکاران
-              </p>
+              <p className="text-sm text-gray-500">دسترسی به دانش همکاران</p>
             </div>
             <div className="p-4 bg-[#17211D] rounded-xl border border-white/10">
               <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center mx-auto mb-3">
                 <Sparkles size={20} className="text-purple-400" />
               </div>
               <h3 className="text-white font-medium mb-1">منابع شفاف</h3>
-              <p className="text-sm text-gray-500">
-                مشاهده منبع هر پاسخ
-              </p>
+              <p className="text-sm text-gray-500">مشاهده منبع هر پاسخ</p>
             </div>
           </div>
 

@@ -22,10 +22,7 @@ import {
   PanelRightOpen,
   LogOut,
   ChevronDown,
-  Pin,
   MoreHorizontal,
-  Trash2,
-  Edit3,
 } from "lucide-react";
 
 interface Conversation {
@@ -95,7 +92,7 @@ export function Sidebar({
           variant="ghost"
           size="icon"
           onClick={onToggle}
-          className="shrink-0"
+          className="text-gray-400"
         >
           {collapsed ? <PanelRightOpen size={20} /> : <PanelRightClose size={20} />}
         </Button>
@@ -105,7 +102,10 @@ export function Sidebar({
       <div className="p-3">
         <Button
           onClick={onNewChat}
-          className={cn("w-full gap-2", collapsed && "px-0")}
+          className={cn(
+            "w-full gap-2",
+            collapsed && "px-0"
+          )}
         >
           <MessageSquarePlus size={20} />
           {!collapsed && "گفتگوی جدید"}
@@ -113,7 +113,7 @@ export function Sidebar({
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto px-3 space-y-1">
+      <nav className="flex-1 overflow-y-auto px-3 scrollbar-thin">
         {/* Main Nav */}
         <div className="space-y-1">
           {navItems.map((item) => {
@@ -123,9 +123,10 @@ export function Sidebar({
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200",
+                  "flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all",
+                  collapsed && "justify-center",
                   isActive
-                    ? "bg-emerald-500/15 text-emerald-400 border-r-2 border-emerald-500"
+                    ? "bg-emerald-500/10 text-emerald-400"
                     : "text-gray-400 hover:bg-white/5 hover:text-white"
                 )}
               >
@@ -138,13 +139,10 @@ export function Sidebar({
 
         {/* Conversations */}
         {!collapsed && conversations.length > 0 && (
-          <div className="mt-6">
+          <div className="mt-6 pt-4 border-t border-white/10">
             {pinnedConversations.length > 0 && (
-              <>
-                <div className="flex items-center gap-2 px-3 py-2 text-xs text-gray-500">
-                  <Pin size={12} />
-                  <span>سنجاق‌شده</span>
-                </div>
+              <div className="mb-4">
+                <p className="text-xs text-gray-500 mb-2 px-3">📌 سنجاق‌شده</p>
                 {pinnedConversations.map((conv) => (
                   <ConversationItem
                     key={conv.id}
@@ -152,12 +150,11 @@ export function Sidebar({
                     isActive={conv.id === currentConversationId}
                   />
                 ))}
-              </>
+              </div>
             )}
-
             {recentConversations.length > 0 && (
-              <>
-                <div className="px-3 py-2 text-xs text-gray-500 mt-4">اخیر</div>
+              <div>
+                <p className="text-xs text-gray-500 mb-2 px-3">اخیر</p>
                 {recentConversations.slice(0, 10).map((conv) => (
                   <ConversationItem
                     key={conv.id}
@@ -165,7 +162,7 @@ export function Sidebar({
                     isActive={conv.id === currentConversationId}
                   />
                 ))}
-              </>
+              </div>
             )}
           </div>
         )}
@@ -196,7 +193,7 @@ export function Sidebar({
             </button>
 
             {!collapsed && showAdmin && (
-              <div className="mt-1 space-y-1 animate-slide-down">
+              <div className="mt-1 space-y-1">
                 {adminItems.map((item) => {
                   const isActive = pathname === item.href;
                   return (
@@ -261,8 +258,6 @@ function ConversationItem({
   conversation: Conversation;
   isActive: boolean;
 }) {
-  const [showMenu, setShowMenu] = useState(false);
-
   return (
     <Link
       href={`/chat/${conversation.id}`}
@@ -278,7 +273,6 @@ function ConversationItem({
       <button
         onClick={(e) => {
           e.preventDefault();
-          setShowMenu(!showMenu);
         }}
         className="opacity-0 group-hover:opacity-100 transition-opacity"
       >
