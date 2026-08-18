@@ -1,214 +1,287 @@
 "use client";
 
-import React from "react";
-import { TopBar } from "@/components/layout/TopBar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import {
-  Users,
-  FileText,
-  MessageSquare,
-  Brain,
-  Activity,
-  Database,
-  Cpu,
-  HardDrive,
-  TrendingUp,
-  ArrowUpRight,
-  CheckCircle,
-  AlertCircle,
-} from "lucide-react";
-import { formatJalaaliDate } from "@/lib/persian-date";
+import { useState, useEffect } from "react";
+import { useAuth } from "@/lib/auth-context";
+import { useRouter } from "next/navigation";
+import { timeAgo } from "@/lib/persian-date";
+import { formatFileSize } from "@/lib/utils";
 
-const stats = [
-  {
-    title: "کاربران",
-    value: "124",
-    change: "+3 امروز",
-    icon: Users,
-    color: "text-blue-400 bg-blue-500/20",
-  },
-  {
-    title: "اسناد",
-    value: "8,432",
-    change: "+12 امروز",
-    icon: FileText,
-    color: "text-purple-400 bg-purple-500/20",
-  },
-  {
-    title: "گفتگوها",
-    value: "1,203",
-    change: "+89 امروز",
-    icon: MessageSquare,
-    color: "text-emerald-400 bg-emerald-500/20",
-  },
-  {
-    title: "تجربیات",
-    value: "234",
-    change: "+5 امروز",
-    icon: Brain,
-    color: "text-orange-400 bg-orange-500/20",
-  },
-];
+interface AuditLog {
+  id: string;
+  eventCode: string;
+  actorName: string | null;
+  resourceType: string | null;
+  resourceName: string | null;
+  outcome: string | null;
+  ipAddress: string | null;
+  createdAt: string;
+}
 
-const systemHealth = [
-  { name: "Database", status: "healthy", latency: "45ms", usage: "2.1GB" },
-  { name: "LLM", status: "healthy", latency: "2.3s", usage: "8GB VRAM" },
-  { name: "Embedding", status: "healthy", latency: "125ms", usage: "2GB RAM" },
-  { name: "Storage", status: "healthy", latency: "-", usage: "12GB / 100GB" },
-  { name: "Vector DB", status: "healthy", latency: "5ms", usage: "2.4M chunks" },
-  { name: "OCR", status: "loading", latency: "-", usage: "-" },
-];
+interface HealthStatus {
+  ok: boolean;
+  database: string;
+  ai: {
+    llm: { available: boolean; name: string; isLocal: boolean };
+    embedding: { available: boolean; name: string; isLocal: boolean; dimensions: number };
+  } | null;
+  timestamp: string;
+}
 
-const topResources = [
-  { name: "SOP-Maintenance.pdf", views: 234, queries: 89 },
-  { name: "HR-Policy.docx", views: 189, queries: 56 },
-  { name: "Safety-Guide.pptx", views: 156, queries: 45 },
-  { name: "تجربه تعمیر پمپ", views: 123, queries: 67 },
-];
+export default function AdminPage() {
+  const { user } = useAuth();
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState("dashboard");
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [loadingAudit, setLoadingAudit] = useState(false);
 
-export default function AdminDashboardPage() {
-  const today = formatJalaaliDate(new Date());
+  useEffect(() => {
+    if (user && !user.isAdmin) {
+      router.push("/chat");
+    }
+  }, [user, router]);
+
+  useEffect(() => {
+    loadHealth();
+    if (activeTab === "audit") loadAuditLogs();
+  }, [activeTab]);
+
+  const loadHealth = async () => {
+    try {
+      const res = await fetch("/api/health");
+      if (res.ok) setHealth(await res.json() as HealthStatus);
+    } catch { /* ignore */ }
+  };
+
+  const loadAuditLogs = async () => {
+    setLoadingAudit(true);
+    try {
+      const res = await fetch("/api/audit?limit=50");
+      if (res.ok) setAuditLogs(await res.json() as AuditLog[]);
+    } catch { /* ignore */ }
+    finally { setLoadingAudit(false); }
+  };
+
+  const triggerProcess = async () => {
+    try {
+      const res = await fetch("/api/jobs/process", {
+        method: "POST",
+        headers: { "x-job-secret": "internal-job-secret" },
+      });
+      const data = await res.json() as { processed: boolean };
+      alert(data.processed ? "یک کار پردازش شد" : "صف پردازش خالی است");
+    } catch {
+      alert("خطا در اجرای کار");
+    }
+  };
+
+  if (!user?.isAdmin) return null;
+
+  const TABS = [
+    { id: "dashboard", label: "داشبورد" },
+    { id: "ai", label: "وضعیت AI" },
+    { id: "audit", label: "گزارش حسابرسی" },
+    { id: "jobs", label: "کارهای پردازش" },
+  ];
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <TopBar title="داشبورد مدیریتی" showModelStatus={false} />
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Header */}
+      <div className="border-b border-slate-700 bg-slate-800 px-6 py-4 flex-shrink-0">
+        <h1 className="text-white font-bold text-lg">پنل مدیریت</h1>
+        <p className="text-slate-400 text-sm">⚙️ دسترسی مدیر ارشد — همه عملیات لاگ می‌شود</p>
+      </div>
 
-      <div className="flex-1 p-6">
-        {/* Date */}
-        <p className="text-sm text-gray-400 mb-6">امروز {today}</p>
+      {/* Tabs */}
+      <div className="flex border-b border-slate-700 bg-slate-800 px-6 flex-shrink-0">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.id
+                ? "border-blue-500 text-blue-400"
+                : "border-transparent text-slate-400 hover:text-white"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          {stats.map((stat) => (
-            <Card key={stat.title} className="p-5">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm text-gray-400 mb-1">{stat.title}</p>
-                  <p className="text-3xl font-bold text-white">{stat.value}</p>
-                  <p className="text-xs text-emerald-400 mt-1 flex items-center gap-1">
-                    <TrendingUp size={12} />
-                    {stat.change}
-                  </p>
-                </div>
-                <div className={`p-3 rounded-xl ${stat.color}`}>
-                  <stat.icon size={24} />
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-6">
+        {activeTab === "dashboard" && (
+          <div className="max-w-4xl mx-auto space-y-6">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <p className="text-slate-400 text-sm mb-1">وضعیت پایگاه داده</p>
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${health?.database === "READY" ? "bg-green-400" : "bg-red-400"}`} />
+                  <span className="text-white font-medium">{health?.database ?? "در حال بررسی..."}</span>
                 </div>
               </div>
-            </Card>
-          ))}
-        </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <p className="text-slate-400 text-sm mb-1">مدل LLM</p>
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${health?.ai?.llm.available ? "bg-green-400" : "bg-yellow-400"}`} />
+                  <span className="text-white font-medium text-sm">
+                    {health?.ai?.llm.available ? health.ai.llm.name : "آفلاین (Fallback فعال)"}
+                  </span>
+                </div>
+              </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <p className="text-slate-400 text-sm mb-1">مدل Embedding</p>
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${health?.ai?.embedding.available ? "bg-green-400" : "bg-yellow-400"}`} />
+                  <span className="text-white font-medium text-sm">
+                    {health?.ai?.embedding.available ? health.ai.embedding.name : "Local Fallback (Hashing)"}
+                  </span>
+                </div>
+              </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <p className="text-slate-400 text-sm mb-1">آخرین بررسی سلامت</p>
+                <span className="text-white font-medium text-sm">
+                  {health?.timestamp ? timeAgo(health.timestamp) : "—"}
+                </span>
+              </div>
+            </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* System Health */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Activity size={20} className="text-emerald-400" />
-                وضعیت سیستم
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {systemHealth.map((service) => (
+            {/* Ollama setup guide */}
+            {health && !health.ai?.llm.available && (
+              <div className="bg-blue-900/20 border border-blue-700 rounded-xl p-5">
+                <h3 className="text-blue-300 font-medium mb-2">راهنمای فعال‌سازی Ollama (LLM محلی)</h3>
+                <ol className="text-blue-200 text-sm space-y-1 list-decimal list-inside">
+                  <li>نصب Ollama: <code className="bg-slate-800 px-1 rounded">https://ollama.com</code></li>
+                  <li>دانلود مدل: <code className="bg-slate-800 px-1 rounded">ollama pull qwen2.5:7b</code></li>
+                  <li>دانلود Embedding: <code className="bg-slate-800 px-1 rounded">ollama pull nomic-embed-text</code></li>
+                  <li>Ollama به‌صورت خودکار شناسایی می‌شود (هیچ API Key نیاز نیست)</li>
+                </ol>
+                <p className="text-slate-400 text-xs mt-2">
+                  ⚠️ بدون Ollama، سیستم از جستجوی کلمه‌کلیدی محلی استفاده می‌کند (بدون LLM).
+                  هیچ داده‌ای به Cloud ارسال نمی‌شود.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "ai" && (
+          <div className="max-w-2xl mx-auto space-y-4">
+            <h2 className="text-white font-semibold">وضعیت سیستم AI</h2>
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 space-y-4">
+              <div>
+                <p className="text-slate-400 text-xs font-medium mb-2">مدل LLM</p>
+                <div className="flex items-center justify-between">
+                  <span className="text-white text-sm">{health?.ai?.llm.name ?? "نامشخص"}</span>
+                  <span className={`text-xs px-2 py-1 rounded-full ${
+                    health?.ai?.llm.available
+                      ? "bg-green-900/50 text-green-400"
+                      : "bg-yellow-900/50 text-yellow-400"
+                  }`}>
+                    {health?.ai?.llm.available ? "آنلاین" : "غیرفعال"}
+                  </span>
+                </div>
+                <p className="text-slate-600 text-xs mt-1">
+                  {health?.ai?.llm.isLocal ? "✅ کاملاً محلی (بدون Cloud)" : "⚠️ Cloud"}
+                </p>
+              </div>
+              <hr className="border-slate-700" />
+              <div>
+                <p className="text-slate-400 text-xs font-medium mb-2">مدل Embedding</p>
+                <div className="flex items-center justify-between">
+                  <span className="text-white text-sm">{health?.ai?.embedding.name ?? "نامشخص"}</span>
+                  <span className={`text-xs px-2 py-1 rounded-full ${
+                    health?.ai?.embedding.available
+                      ? "bg-green-900/50 text-green-400"
+                      : "bg-yellow-900/50 text-yellow-400"
+                  }`}>
+                    {health?.ai?.embedding.available ? "آنلاین" : "Local Fallback"}
+                  </span>
+                </div>
+                <p className="text-slate-600 text-xs mt-1">ابعاد: {health?.ai?.embedding.dimensions ?? "—"}</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <p className="text-white font-medium mb-2 text-sm">تضمین امنیتی</p>
+              <ul className="text-slate-400 text-xs space-y-1">
+                <li>✅ هیچ API Cloud LLM پیکربندی نشده</li>
+                <li>✅ Fallback به Cloud ممنوع است (Directive §15)</li>
+                <li>✅ تمام پردازش‌ها بر روی سرور محلی انجام می‌شوند</li>
+                <li>✅ داده‌های سازمانی هرگز از شبکه خارج نمی‌شوند</li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "audit" && (
+          <div className="max-w-4xl mx-auto">
+            <h2 className="text-white font-semibold mb-4">گزارش حسابرسی (آخرین ۵۰ رویداد)</h2>
+            {loadingAudit ? (
+              <div className="text-slate-500 text-center py-8">بارگذاری...</div>
+            ) : auditLogs.length === 0 ? (
+              <div className="text-slate-500 text-center py-8">هنوز رویدادی ثبت نشده</div>
+            ) : (
+              <div className="space-y-2">
+                {auditLogs.map((log) => (
                   <div
-                    key={service.name}
-                    className="flex items-center justify-between py-3 border-b border-white/5 last:border-0"
+                    key={log.id}
+                    className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 flex items-center gap-4"
                   >
-                    <div className="flex items-center gap-3">
-                      {service.status === "healthy" ? (
-                        <CheckCircle size={18} className="text-emerald-400" />
-                      ) : service.status === "loading" ? (
-                        <div className="w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
-                      ) : (
-                        <AlertCircle size={18} className="text-red-400" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-mono ${
+                          log.outcome === "FAILURE"
+                            ? "bg-red-900/50 text-red-400"
+                            : "bg-green-900/50 text-green-400"
+                        }`}>
+                          {log.eventCode}
+                        </span>
+                        {log.actorName && (
+                          <span className="text-slate-400 text-xs truncate">{log.actorName}</span>
+                        )}
+                      </div>
+                      {log.resourceName && (
+                        <p className="text-slate-500 text-xs mt-0.5 truncate">{log.resourceName}</p>
                       )}
-                      <span className="text-white">{service.name}</span>
                     </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      {service.latency !== "-" && (
-                        <span className="text-gray-400">{service.latency}</span>
-                      )}
-                      <span className="text-gray-500">{service.usage}</span>
+                    <div className="flex-shrink-0 text-slate-600 text-xs">
+                      {timeAgo(log.createdAt)}
                     </div>
                   </div>
                 ))}
               </div>
-            </CardContent>
-          </Card>
+            )}
+          </div>
+        )}
 
-          {/* Top Resources */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileText size={20} className="text-emerald-400" />
-                منابع پرکاربرد
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {topResources.map((resource, index) => (
-                  <div
-                    key={resource.name}
-                    className="flex items-center justify-between py-3 border-b border-white/5 last:border-0"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 text-xs flex items-center justify-center">
-                        {index + 1}
-                      </span>
-                      <span className="text-white truncate max-w-[200px]">
-                        {resource.name}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      <span className="text-gray-400">{resource.views} بازدید</span>
-                      <Badge variant="default">{resource.queries} پرسش</Badge>
-                    </div>
-                  </div>
-                ))}
+        {activeTab === "jobs" && (
+          <div className="max-w-2xl mx-auto space-y-4">
+            <h2 className="text-white font-semibold">مدیریت کارهای پردازش</h2>
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 space-y-4">
+              <div>
+                <h3 className="text-white text-sm font-medium mb-2">پردازش دستی</h3>
+                <p className="text-slate-400 text-sm mb-3">
+                  اسناد بارگذاری‌شده برای پردازش در صف هستند.
+                  برای پردازش فوری دکمه زیر را کلیک کنید.
+                </p>
+                <button
+                  onClick={triggerProcess}
+                  className="bg-blue-600 hover:bg-blue-500 text-white text-sm px-4 py-2 rounded-lg transition-colors"
+                >
+                  ▶ پردازش کار بعدی
+                </button>
               </div>
-            </CardContent>
-          </Card>
-
-          {/* RAG Performance */}
-          <Card className="lg:col-span-2">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Cpu size={20} className="text-emerald-400" />
-                عملکرد RAG
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                <div>
-                  <p className="text-sm text-gray-400 mb-2">نرخ پاسخ‌دهی</p>
-                  <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold text-white">94%</span>
-                    <span className="text-emerald-400 text-sm pb-1">+2%</span>
-                  </div>
-                  <Progress value={94} className="mt-2" />
-                </div>
-                <div>
-                  <p className="text-sm text-gray-400 mb-2">میانگین امتیاز منابع</p>
-                  <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold text-white">0.82</span>
-                    <span className="text-emerald-400 text-sm pb-1">+0.05</span>
-                  </div>
-                  <Progress value={82} className="mt-2" />
-                </div>
-                <div>
-                  <p className="text-sm text-gray-400 mb-2">بازخورد مثبت</p>
-                  <div className="flex items-end gap-2">
-                    <span className="text-3xl font-bold text-white">87%</span>
-                    <span className="text-emerald-400 text-sm pb-1">+3%</span>
-                  </div>
-                  <Progress value={87} className="mt-2" />
-                </div>
+              <hr className="border-slate-700" />
+              <div>
+                <p className="text-slate-400 text-xs">
+                  ⚠️ در محیط Production، از یک Cron Job هر ۳۰ ثانیه برای پردازش خودکار استفاده کنید.
+                </p>
               </div>
-            </CardContent>
-          </Card>
-        </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

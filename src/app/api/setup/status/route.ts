@@ -1,40 +1,18 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { setupStatus, users } from "@/db/schema";
-import { count } from "drizzle-orm";
-import { ensureDatabaseMigrated } from "@/db/migrate";
+import { setupStatus } from "@/db/schema";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(): Promise<NextResponse> {
   try {
-    await ensureDatabaseMigrated();
     const [status] = await db.select().from(setupStatus).limit(1);
-    
-    if (status?.completed) {
-      return NextResponse.json({ completed: true, currentStep: 8 });
-    }
-
-    const [userCount] = await db.select({ count: count() }).from(users);
-    
-    if (userCount.count > 0) {
-      if (!status) {
-        await db.insert(setupStatus).values({
-          id: 1,
-          completed: true,
-          currentStep: 8,
-          completedAt: new Date(),
-        });
-      }
-      return NextResponse.json({ completed: true, currentStep: 8 });
-    }
-
     return NextResponse.json({
-      completed: false,
-      currentStep: status?.currentStep || 1,
+      completed: status?.completed ?? false,
+      currentStep: status?.currentStep ?? 1,
+      organizationName: status?.organizationName ?? null,
     });
-  } catch (error) {
-    console.error("Setup status error:", error);
+  } catch {
     return NextResponse.json({ completed: false, currentStep: 1 });
   }
 }

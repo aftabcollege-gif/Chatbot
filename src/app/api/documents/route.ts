@@ -1,119 +1,132 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, and, isNull, desc } from "drizzle-orm";
 import { db } from "@/db";
-import { documents, users } from "@/db/schema";
-import { jwtVerify } from "jose";
+import { documents } from "@/db/schema";
+import { getCurrentUser, hasPermission } from "@/lib/auth-server";
+import { PERMISSIONS } from "@/lib/permissions";
+import { storeFile, validateUpload, computeSHA256 } from "@/lib/storage";
+import { queueDocumentProcessing } from "@/lib/document-processor";
 import { logEvent } from "@/lib/audit";
 
-const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "change-this-to-random-64-char-string");
+export const dynamic = "force-dynamic";
 
-async function getUser(request: NextRequest) {
-  const token = request.cookies.get("access_token")?.value;
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    return payload.userId as string;
-  } catch { return null; }
-}
-
-export async function GET(request: NextRequest) {
-  const userId = await getUser(request);
-  if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
-  
-  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!user?.organizationId) return NextResponse.json({ items: [] });
-
-  const rows = await db.select().from(documents).where(eq(documents.organizationId, user.organizationId)).orderBy(documents.createdAt);
-  return NextResponse.json({ items: rows });
-}
-
-export async function POST(request: NextRequest) {
-  const userId = await getUser(request);
-  if (!userId) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
-
-  try {
-    const form = await request.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) return NextResponse.json({ error: "فایل الزامی است" }, { status: 400 });
-    if (file.size > Number(process.env.MAX_UPLOAD_BYTES ?? 20 * 1024 * 1024)) {
-      return NextResponse.json({ error: "حجم فایل بیش از حد مجاز است" }, { status: 413 });
-    }
-
-    const [owner] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-    if (!owner?.organizationId) return NextResponse.json({ error: "سازمان کاربر مشخص نیست" }, { status: 400 });
-
-    const { createHash } = await import("node:crypto");
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const hash = createHash("sha256").update(buffer).digest("hex");
-
-    const { extractText } = await import("@/lib/extract-text");
-    const text = (await extractText(buffer, file.type || file.name)).trim();
-    if (!text) return NextResponse.json({ error: "متن قابل استخراج از فایل پیدا نشد" }, { status: 422 });
-
-    const { splitIntoChunks } = await import("@/lib/chunking");
-    const chunks = splitIntoChunks(text);
-    if (!chunks.length) return NextResponse.json({ error: "فایل محتوای متنی قابل پردازش ندارد" }, { status: 422 });
-
-    const { documentChunks } = await import("@/db/schema");
-
-    const [document] = await db.insert(documents).values({
-      organizationId: owner.organizationId,
-      departmentId: owner.departmentId,
-      ownerId: owner.id,
-      title: file.name.replace(/\.[^.]+$/, ""),
-      originalFilename: file.name,
-      fileType: file.name.split(".").pop()?.toLowerCase() || "unknown",
-      mimeType: file.type || "application/octet-stream",
-      fileSizeBytes: file.size,
-      fileHash: hash,
-      storagePath: `database://${hash}`,
-      status: "PROCESSING",
-      processingProgress: 10,
-      visibility: "organization",
-      metadata: { extractedCharacters: text.length },
-    }).returning();
-
-    try {
-      const { getEmbeddings } = await import("@/lib/embeddings");
-
-      const rows: (typeof documentChunks.$inferInsert)[] = [];
-      const batchSize = 32;
-      for (let i = 0; i < chunks.length; i += batchSize) {
-        const batch = chunks.slice(i, i + batchSize);
-        const embeddings = await getEmbeddings(batch.map((item) => item.content));
-        rows.push(...batch.map((item, j) => ({
-          documentId: document.id,
-          organizationId: owner.organizationId!,
-          departmentId: owner.departmentId,
-          chunkIndex: item.chunkIndex,
-          content: item.content,
-          contentNormalized: item.content.toLowerCase(),
-          sourceType: "document",
-          visibility: "organization",
-          tokenCount: Math.ceil(item.content.length / 4),
-          embedding: embeddings[j],
-          metadata: {},
-        })));
-      }
-
-      await db.insert(documentChunks).values(rows);
-      const [ready] = await db.update(documents).set({ status: "READY", processingProgress: 100, updatedAt: new Date() }).where(eq(documents.id, document.id)).returning();
-      await logEvent({
-        eventCode: "document.upload",
-        actorId: owner.id,
-        actorName: owner.name,
-        resourceType: "document",
-        resourceId: document.id,
-        resourceName: document.title,
-        request,
-      });
-      return NextResponse.json({ document: ready, chunks: rows.length }, { status: 201 });
-    } catch (processingError) {
-      await db.update(documents).set({ status: "ERROR", processingError: processingError instanceof Error ? processingError.message : "خطای پردازش", updatedAt: new Date() }).where(eq(documents.id, document.id));
-      throw processingError;
-    }
-  } catch (error) {
-    console.error("Document upload error", error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : "خطا در پردازش فایل" }, { status: 500 });
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const user = await getCurrentUser(request);
+  if (!user) return NextResponse.json({ error: "احراز هویت الزامی است" }, { status: 401 });
+  if (!hasPermission(user, PERMISSIONS.DOCUMENT_READ)) {
+    return NextResponse.json({ error: "دسترسی مجاز نیست" }, { status: 403 });
   }
+  if (!user.organizationId) {
+    return NextResponse.json({ error: "کاربر به سازمانی تعلق ندارد" }, { status: 400 });
+  }
+
+  const docs = await db
+    .select()
+    .from(documents)
+    .where(
+      and(
+        eq(documents.organizationId, user.organizationId),
+        isNull(documents.deletedAt)
+      )
+    )
+    .orderBy(desc(documents.createdAt))
+    .limit(100);
+
+  return NextResponse.json(docs);
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const user = await getCurrentUser(request);
+  if (!user) return NextResponse.json({ error: "احراز هویت الزامی است" }, { status: 401 });
+  if (!hasPermission(user, PERMISSIONS.DOCUMENT_CREATE)) {
+    return NextResponse.json({ error: "دسترسی مجاز نیست" }, { status: 403 });
+  }
+  if (!user.organizationId) {
+    return NextResponse.json({ error: "کاربر به سازمانی تعلق ندارد" }, { status: 400 });
+  }
+
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return NextResponse.json({ error: "فرمت درخواست نامعتبر است" }, { status: 400 });
+  }
+
+  const file = formData.get("file") as File | null;
+  const title = formData.get("title") as string | null;
+
+  if (!file) {
+    return NextResponse.json({ error: "فایل الزامی است" }, { status: 400 });
+  }
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const filename = file.name;
+  const mimeType = file.type;
+
+  // Validate file
+  const validation = validateUpload(buffer, filename, mimeType);
+  if (!validation.valid) {
+    return NextResponse.json({ error: validation.error }, { status: 400 });
+  }
+
+  // Check for duplicate
+  const fileHash = computeSHA256(buffer);
+  const [existing] = await db
+    .select()
+    .from(documents)
+    .where(
+      and(
+        eq(documents.organizationId, user.organizationId),
+        eq(documents.fileHash, fileHash),
+        isNull(documents.deletedAt)
+      )
+    )
+    .limit(1);
+
+  if (existing) {
+    return NextResponse.json(
+      { error: "این فایل قبلاً بارگذاری شده است.", existingId: existing.id },
+      { status: 409 }
+    );
+  }
+
+  // Store file
+  const stored = await storeFile(buffer, filename, user.organizationId);
+
+  // Create document record
+  const [doc] = await db
+    .insert(documents)
+    .values({
+      organizationId: user.organizationId,
+      departmentId: user.departmentId,
+      ownerId: user.id,
+      title: title ?? filename,
+      originalFilename: filename,
+      fileType: filename.split(".").pop()?.toLowerCase() ?? "unknown",
+      mimeType,
+      fileSizeBytes: buffer.length,
+      fileHash,
+      storagePath: stored.path,
+      status: "UPLOADED",
+      visibility: "department",
+    })
+    .returning();
+
+  // Queue for processing
+  await queueDocumentProcessing(doc.id, user.organizationId);
+
+  // Audit
+  await logEvent({
+    eventCode: "DOCUMENT_UPLOAD",
+    actorId: user.id,
+    actorName: user.name,
+    organizationId: user.organizationId,
+    resourceType: "document",
+    resourceId: doc.id,
+    resourceName: doc.title,
+    outcome: "SUCCESS",
+    metadata: { filename, fileType: doc.fileType, sizeBytes: buffer.length },
+  });
+
+  return NextResponse.json(doc, { status: 201 });
 }

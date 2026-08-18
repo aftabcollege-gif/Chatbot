@@ -1,38 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
-import { sessions, users } from "@/db/schema";
-import { eq } from "drizzle-orm";
-import { jwtVerify } from "jose";
+import { revokeSession } from "@/lib/auth-server";
 import { logEvent } from "@/lib/audit";
+import { getUserIdFromRequest } from "@/lib/auth-server";
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "change-this-to-random-64-char-string"
-);
+export const dynamic = "force-dynamic";
 
-export async function POST(request: NextRequest) {
-  try {
-    const token = request.cookies.get("access_token")?.value;
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const token = request.cookies.get("access_token")?.value;
+  const userId = await getUserIdFromRequest(request);
 
-    if (token) {
-      try {
-        const { payload } = await jwtVerify(token, JWT_SECRET);
-        const userId = payload.userId as string;
-        await db.delete(sessions).where(eq(sessions.userId, userId));
-        const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-        await logEvent({ eventCode: "auth.logout", actorId: userId, actorName: user?.name, request });
-      } catch {
-        // Token invalid, just clear cookies
-      }
-    }
-
-    const response = NextResponse.json({ success: true });
-    
-    response.cookies.delete("access_token");
-    response.cookies.delete("refresh_token");
-
-    return response;
-  } catch (error) {
-    console.error("Logout error:", error);
-    return NextResponse.json({ success: true });
+  if (token) {
+    await revokeSession(token);
   }
+
+  if (userId) {
+    await logEvent({
+      eventCode: "LOGOUT",
+      actorId: userId,
+      outcome: "SUCCESS",
+      request,
+    });
+  }
+
+  const response = NextResponse.json({ success: true });
+  response.cookies.delete("access_token");
+  return response;
 }

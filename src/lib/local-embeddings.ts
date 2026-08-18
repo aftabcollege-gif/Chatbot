@@ -1,22 +1,31 @@
 /**
- * Fully offline, dependency-free "embedding" and lexical utilities.
+ * Local Embedding — Offline Hashing-Trick Vectorizer
  *
- * The project must work without any external AI provider, API key, or
- * installed extension (such as pgvector). To achieve semantic-ish search
- * without a real embedding model, we use a deterministic hashing-trick
- * vectorizer (similar to scikit-learn's HashingVectorizer): every token
- * (and bigram) is hashed into a fixed-size vector. Cosine similarity between
- * these vectors correlates well with lexical/term overlap, which is enough
- * to power retrieval-augmented answers for an internal knowledge base.
+ * IMPORTANT: This is a FALLBACK-ONLY implementation using a hashing trick
+ * (similar to scikit-learn's HashingVectorizer). It provides lexical similarity,
+ * NOT semantic similarity. For production-quality RAG, configure Ollama with
+ * nomic-embed-text or mxbai-embed-large (see OLLAMA_BASE_URL in .env).
+ *
+ * This fallback ensures the system works without any external dependency,
+ * but RAG quality will be based on keyword overlap only.
  */
 
-export const LOCAL_EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS ?? "512");
+export const LOCAL_EMBEDDING_DIMENSIONS = parseInt(
+  process.env.EMBEDDING_DIMENSIONS ?? "768"
+);
 
-const STOPWORDS = new Set([
-  "the", "a", "an", "is", "are", "was", "were", "be", "been", "of", "to", "in", "on",
-  "and", "or", "for", "with", "that", "this", "it", "as", "by", "at",
-  "از", "به", "با", "را", "که", "در", "این", "آن", "است", "هست", "بود", "شد", "برای",
-  "یا", "و", "تا", "می", "های", "ها", "کرد", "کند", "شود", "شده", "هم", "نیز", "اگر",
+const STOPWORDS_FA = new Set([
+  "از", "به", "با", "را", "که", "در", "این", "آن", "است", "هست", "بود",
+  "شد", "برای", "یا", "و", "تا", "می", "های", "ها", "کرد", "کند", "شود",
+  "شده", "هم", "نیز", "اگر", "اما", "ولی", "چون", "زیرا", "پس", "بر",
+  "هر", "چه", "که", "دیگر", "بین", "روی", "زیر", "کنار", "طبق", "حتی",
+]);
+
+const STOPWORDS_EN = new Set([
+  "the", "a", "an", "is", "are", "was", "were", "be", "been", "of", "to",
+  "in", "on", "and", "or", "for", "with", "that", "this", "it", "as", "by",
+  "at", "from", "we", "our", "us", "you", "your", "they", "their", "he",
+  "she", "his", "her", "its", "not", "no", "but", "if", "then",
 ]);
 
 export function tokenize(text: string): string[] {
@@ -26,12 +35,20 @@ export function tokenize(text: string): string[] {
     .normalize("NFKC")
     .replace(/[\u200c\u200f\u200e]/g, " ")
     .replace(/[یي]/g, "ی")
-    .replace(/[کك]/g, "ک");
+    .replace(/[کك]/g, "ک")
+    .replace(/[ۀة]/g, "ه");
+
   const raw = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
-  return raw.filter((token) => token.length > 1 && !STOPWORDS.has(token));
+  return raw.filter(
+    (token) =>
+      token.length > 1 &&
+      !STOPWORDS_FA.has(token) &&
+      !STOPWORDS_EN.has(token)
+  );
 }
 
 function hashToken(token: string): number {
+  // FNV-1a 32-bit hash
   let hash = 2166136261;
   for (let i = 0; i < token.length; i++) {
     hash ^= token.charCodeAt(i);
@@ -40,11 +57,15 @@ function hashToken(token: string): number {
   return hash >>> 0;
 }
 
-export function localEmbedding(text: string, dimensions = LOCAL_EMBEDDING_DIMENSIONS): number[] {
+export function localEmbedding(
+  text: string,
+  dimensions = LOCAL_EMBEDDING_DIMENSIONS
+): number[] {
   const vector = new Array(dimensions).fill(0);
   const tokens = tokenize(text);
   if (!tokens.length) return vector;
 
+  // Unigrams
   for (const token of tokens) {
     const hash = hashToken(token);
     const index = hash % dimensions;
@@ -52,6 +73,7 @@ export function localEmbedding(text: string, dimensions = LOCAL_EMBEDDING_DIMENS
     vector[index] += sign;
   }
 
+  // Bigrams (weighted lower than unigrams)
   for (let i = 0; i < tokens.length - 1; i++) {
     const bigram = `${tokens[i]}_${tokens[i + 1]}`;
     const hash = hashToken(bigram);
@@ -60,8 +82,10 @@ export function localEmbedding(text: string, dimensions = LOCAL_EMBEDDING_DIMENS
     vector[index] += sign * 0.5;
   }
 
-  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
-  return vector.map((value) => value / norm);
+  // L2 normalize
+  const norm =
+    Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0)) || 1;
+  return vector.map((v) => v / norm);
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
@@ -79,20 +103,11 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export function splitSentences(text: string): string[] {
-  if (!text) return [];
-  return text
-    .replace(/\r\n/g, "\n")
-    .split(/(?<=[.!?؟\n])\s+/u)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
-}
-
-/** Simple lexical overlap score between a query and a piece of text (0..1). */
-export function lexicalScore(query: string[], candidate: string): number {
-  const candidateTokens = tokenize(candidate);
-  if (!query.length || !candidateTokens.length) return 0;
+/** Simple lexical overlap score (0..1) */
+export function lexicalScore(queryTokens: string[], text: string): number {
+  const candidateTokens = tokenize(text);
+  if (!queryTokens.length || !candidateTokens.length) return 0;
   const candidateSet = new Set(candidateTokens);
-  const overlap = query.filter((token) => candidateSet.has(token)).length;
+  const overlap = queryTokens.filter((t) => candidateSet.has(t)).length;
   return overlap / Math.sqrt(candidateTokens.length);
 }

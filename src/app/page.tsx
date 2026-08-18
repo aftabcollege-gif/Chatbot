@@ -3,43 +3,42 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
-import { Loader2 } from "lucide-react";
 
 export default function HomePage() {
   const router = useRouter();
   const { isAuthenticated, isLoading } = useAuth();
-  const [setupStatus, setSetupStatus] = useState<{ completed: boolean } | null>(null);
+  const [setupDone, setSetupDone] = useState<boolean | null>(null);
 
   useEffect(() => {
     async function checkSetup() {
       try {
         const res = await fetch("/api/setup/status");
-        const data = await res.json();
-        setSetupStatus(data);
+        const data = await res.json() as { completed: boolean };
+        setSetupDone(data.completed);
       } catch {
-        setSetupStatus({ completed: false });
+        setSetupDone(false);
       }
     }
-    checkSetup();
+    void checkSetup();
   }, []);
 
   useEffect(() => {
-    if (isLoading || setupStatus === null) return;
+    if (isLoading || setupDone === null) return;
 
-    if (!setupStatus.completed) {
+    if (!setupDone) {
       router.push("/setup");
     } else if (isAuthenticated) {
       router.push("/chat");
     } else {
       router.push("/login");
     }
-  }, [isLoading, isAuthenticated, setupStatus, router]);
+  }, [isLoading, isAuthenticated, setupDone, router]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0B0F0E]">
-      <div className="text-center">
-        <Loader2 className="h-12 w-12 animate-spin text-emerald-500 mx-auto mb-4" />
-        <p className="text-emerald-400">در حال بارگذاری...</p>
+    <div className="min-h-screen flex items-center justify-center bg-slate-900">
+      <div className="flex flex-col items-center gap-4">
+        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-slate-400 text-sm">در حال بارگذاری...</p>
       </div>
     </div>
   );

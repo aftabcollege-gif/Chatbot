@@ -1,211 +1,159 @@
 "use client";
 
-import React, { useState } from "react";
-import { TopBar } from "@/components/layout/TopBar";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import {
-  Search,
-  FileText,
-  Globe,
-  Brain,
-  Building2,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
-import { getRelativeTime } from "@/lib/persian-date";
+import { useState } from "react";
 
 interface SearchResult {
   id: string;
-  type: "document" | "web" | "knowledge";
   title: string;
-  snippet: string;
+  content: string;
+  sourceType: "document" | "knowledge" | "experience";
+  relevanceScore: number;
+  combinedScore?: number;
+  excerpt?: string;
   pageNumber?: number;
   section?: string;
-  department?: string;
-  relevanceScore: number;
-  createdAt: string;
 }
 
-const typeConfig = {
-  document: { icon: FileText, label: "سند", color: "text-blue-400 bg-blue-500/20" },
-  web: { icon: Globe, label: "وب", color: "text-purple-400 bg-purple-500/20" },
-  knowledge: { icon: Brain, label: "تجربه", color: "text-emerald-400 bg-emerald-500/20" },
+const SOURCE_LABELS: Record<string, { label: string; icon: string; className: string }> = {
+  document: { label: "سند", icon: "📄", className: "source-document" },
+  knowledge: { label: "دانش", icon: "📚", className: "source-knowledge" },
+  experience: { label: "تجربه کارکنان", icon: "💡", className: "source-experience" },
 };
 
 export default function SearchPage() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [hasSearched, setHasSearched] = useState(false);
-  const [activeFilter, setActiveFilter] = useState<string>("all");
-  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
 
-    setIsSearching(true);
-    setError("");
+    setLoading(true);
+    setSearched(true);
+
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query.trim())}`);
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, limit: 20 }),
+      });
       if (res.ok) {
-        const data = await res.json();
-        setResults(data.results || []);
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "خطا در جستجو");
-        setResults([]);
+        const data = await res.json() as { results: SearchResult[]; latencyMs: number };
+        setResults(data.results ?? []);
+        setLatencyMs(data.latencyMs);
       }
     } catch {
-      setError("خطا در ارتباط با سرور");
-      setResults([]);
+      // ignore
     } finally {
-      setIsSearching(false);
-      setHasSearched(true);
+      setLoading(false);
     }
   };
 
-  const filteredResults =
-    activeFilter === "all"
-      ? results
-      : results.filter((r) => r.type === activeFilter);
-
   return (
-    <div className="min-h-screen flex flex-col">
-      <TopBar title="جستجو" />
-
-      <div className="flex-1 p-6">
-        {/* Search Box */}
-        <div className="max-w-3xl mx-auto mb-8">
-          <form onSubmit={handleSearch}>
-            <div className="relative">
-              <Search
-                size={24}
-                className="absolute right-5 top-1/2 -translate-y-1/2 text-gray-400"
-              />
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="جستجو در منابع..."
-                className="w-full pl-16 pr-14 py-5 bg-[#17211D] border border-white/10 rounded-2xl text-white text-lg placeholder-gray-500 focus:outline-none focus:border-emerald-500/50"
-              />
-              <Button
-                type="submit"
-                className="absolute left-3 top-1/2 -translate-y-1/2"
-                disabled={isSearching || !query.trim()}
-              >
-                {isSearching ? "..." : "جستجو"}
-              </Button>
-            </div>
-          </form>
-
-          {/* Filters */}
-          <div className="flex items-center gap-4 mt-4">
-            <div className="flex gap-2">
-              {[
-                { id: "all", label: "همه" },
-                { id: "document", label: "اسناد" },
-                { id: "knowledge", label: "تجربیات" },
-              ].map((filter) => (
-                <button
-                  key={filter.id}
-                  onClick={() => setActiveFilter(filter.id)}
-                  className={cn(
-                    "px-3 py-1.5 rounded-lg text-sm transition-colors",
-                    activeFilter === filter.id
-                      ? "bg-emerald-500/20 text-emerald-400"
-                      : "text-gray-400 hover:bg-white/5"
-                  )}
-                >
-                  {filter.label}
-                </button>
-              ))}
-            </div>
-          </div>
+    <div className="h-full overflow-y-auto p-6">
+      <div className="max-w-3xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-xl font-bold text-white mb-1">جستجو در منابع سازمانی</h1>
+          <p className="text-slate-400 text-sm">
+            جستجوی هوشمند در اسناد، دانش‌نامه و تجربیات سازمانی
+          </p>
         </div>
 
-        {error && (
-          <p className="text-center text-red-400 text-sm mb-4">{error}</p>
-        )}
+        <form onSubmit={handleSearch} className="mb-6">
+          <div className="flex gap-3">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="جستجو در تمام منابع سازمانی..."
+              className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 text-sm"
+              style={{ direction: "rtl" }}
+            />
+            <button
+              type="submit"
+              disabled={loading || !query.trim()}
+              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white px-6 py-3 rounded-xl transition-colors text-sm font-medium"
+            >
+              {loading ? (
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto" />
+              ) : (
+                "🔍 جستجو"
+              )}
+            </button>
+          </div>
+        </form>
 
-        {/* Results */}
-        {results.length > 0 && (
-          <div className="max-w-3xl mx-auto">
-            <p className="text-sm text-gray-400 mb-4">
-              {filteredResults.length} نتیجه برای «{query}»
-            </p>
-
-            <div className="space-y-4">
-              {filteredResults.map((result) => (
-                <SearchResultCard key={`${result.type}-${result.id}`} result={result} />
-              ))}
-            </div>
+        {searched && !loading && (
+          <div className="mb-4 text-slate-500 text-sm flex items-center gap-2">
+            <span>{results.length} نتیجه یافت شد</span>
+            {latencyMs !== null && (
+              <span>({latencyMs}ms)</span>
+            )}
           </div>
         )}
 
-        {/* Empty State */}
-        {!isSearching && hasSearched && results.length === 0 && !error && (
+        {loading && (
+          <div className="space-y-3">
+            {[1, 2, 3].map((i) => (
+              <div
+                key={i}
+                className="bg-slate-800 border border-slate-700 rounded-xl p-4 animate-pulse"
+              >
+                <div className="h-4 bg-slate-700 rounded w-1/3 mb-2" />
+                <div className="h-3 bg-slate-700 rounded w-full mb-1" />
+                <div className="h-3 bg-slate-700 rounded w-2/3" />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {searched && !loading && results.length === 0 && (
           <div className="text-center py-12">
-            <Search size={48} className="mx-auto text-gray-600 mb-4" />
-            <h3 className="text-white text-lg mb-2">نتیجه‌ای یافت نشد</h3>
-            <p className="text-gray-500">
-              عبارت دیگری را جستجو کنید یا اسناد/تجربیات بیشتری ثبت کنید
+            <p className="text-4xl mb-3">🔍</p>
+            <p className="text-slate-400">نتیجه‌ای یافت نشد</p>
+            <p className="text-slate-600 text-sm mt-1">
+              اطمینان حاصل کنید اسناد پردازش شده‌اند
             </p>
           </div>
         )}
+
+        <div className="space-y-3">
+          {results.map((result) => {
+            const source = SOURCE_LABELS[result.sourceType] ?? { label: result.sourceType, icon: "📄", className: "bg-slate-700 text-slate-300" };
+            const score = Math.round((result.combinedScore ?? result.relevanceScore) * 100);
+            return (
+              <div
+                key={result.id}
+                className="bg-slate-800 border border-slate-700 rounded-xl p-5 hover:border-slate-500 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <h3 className="text-white font-medium text-sm flex-1 truncate">
+                    {source.icon} {result.title}
+                  </h3>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${source.className}`}>
+                      {source.label}
+                    </span>
+                    <span className="text-xs text-slate-500">{score}٪</span>
+                  </div>
+                </div>
+                <p className="text-slate-400 text-sm leading-relaxed line-clamp-3">
+                  {result.excerpt ?? result.content.slice(0, 300)}
+                </p>
+                {(result.pageNumber || result.section) && (
+                  <div className="mt-2 flex gap-3 text-slate-600 text-xs">
+                    {result.pageNumber && <span>صفحه {result.pageNumber}</span>}
+                    {result.section && <span>{result.section}</span>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
-  );
-}
-
-function SearchResultCard({ result }: { result: SearchResult }) {
-  const config = typeConfig[result.type];
-  const Icon = config.icon;
-
-  return (
-    <Card className="p-5 hover:border-emerald-500/30 transition-all group">
-      <div className="flex items-start gap-4">
-        <div className={cn("p-2 rounded-lg", config.color)}>
-          <Icon size={20} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <Badge variant="default">{config.label}</Badge>
-            {result.pageNumber && (
-              <span className="text-xs text-gray-500">
-                صفحه {result.pageNumber}
-                {result.section && ` • ${result.section}`}
-              </span>
-            )}
-          </div>
-          <h3 className="text-white font-medium mb-2">{result.title}</h3>
-          <p className="text-sm text-gray-400 line-clamp-2">{result.snippet}</p>
-          <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
-            {result.department && (
-              <span className="flex items-center gap-1">
-                <Building2 size={12} />
-                {result.department}
-              </span>
-            )}
-            <span>{getRelativeTime(result.createdAt)}</span>
-            <span className="flex items-center gap-1">
-              <div
-                className={cn(
-                  "w-2 h-2 rounded-full",
-                  result.relevanceScore > 0.5
-                    ? "bg-emerald-400"
-                    : result.relevanceScore > 0.2
-                    ? "bg-yellow-400"
-                    : "bg-gray-400"
-                )}
-              />
-              {Math.round(result.relevanceScore * 100)}%
-            </span>
-          </div>
-        </div>
-      </div>
-    </Card>
   );
 }

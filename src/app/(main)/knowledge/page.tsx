@@ -1,298 +1,212 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { TopBar } from "@/components/layout/TopBar";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { EmptyState } from "@/components/shared/EmptyState";
-import { Brain, Plus, Search, Clock, User, Tag, Building2, Send, CheckCircle2, Globe2 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { getRelativeTime } from "@/lib/persian-date";
-import { useAuth } from "@/lib/auth-context";
+import { useState, useEffect } from "react";
+import { timeAgo } from "@/lib/persian-date";
 
-interface KnowledgeItemData {
+interface KnowledgeItem {
   id: string;
   title: string;
   subject: string | null;
-  problemDescription: string;
-  actionTaken: string;
-  result: string | null;
-  lessonLearned: string;
+  content: string;
+  summary: string | null;
   status: string;
-  visibility: string | null;
   createdAt: string;
 }
 
-const statusConfig: Record<string, { label: string; variant: "secondary" | "warning" | "info" | "success" }> = {
-  DRAFT: { label: "پیش‌نویس", variant: "secondary" },
-  PENDING: { label: "در انتظار تأیید", variant: "warning" },
-  APPROVED: { label: "تأیید شده", variant: "info" },
-  PUBLISHED: { label: "منتشر شده", variant: "success" },
+const STATUS_LABELS: Record<string, { label: string; className: string }> = {
+  DRAFT: { label: "پیش‌نویس", className: "status-draft" },
+  UNDER_REVIEW: { label: "در حال بررسی", className: "status-review" },
+  APPROVED: { label: "تأیید شده", className: "status-approved" },
+  PUBLISHED: { label: "منتشر شده", className: "status-published" },
+  ARCHIVED: { label: "آرشیو شده", className: "status-archived" },
 };
 
-const tabs = [
-  { id: "all", label: "همه" },
-  { id: "DRAFT", label: "پیش‌نویس" },
-  { id: "APPROVED", label: "تأیید شده" },
-  { id: "PUBLISHED", label: "منتشر شده" },
-];
-
 export default function KnowledgePage() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === "admin" || !!user?.permissions?.includes("*");
-  const [activeTab, setActiveTab] = useState("all");
-  const [items, setItems] = useState<KnowledgeItemData[]>([]);
+  const [items, setItems] = useState<KnowledgeItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [form, setForm] = useState({ title: "", subject: "", content: "", tags: "" });
 
   useEffect(() => {
-    fetchItems();
+    loadItems();
   }, []);
 
-  const fetchItems = async () => {
+  const loadItems = async () => {
     try {
       const res = await fetch("/api/knowledge");
       if (res.ok) {
-        const data = await res.json();
-        setItems(data.items || []);
+        const data = await res.json() as KnowledgeItem[];
+        setItems(data);
       }
-    } catch (error) {
-      console.error("Error:", error);
+    } catch {
+      // ignore
     } finally {
       setLoading(false);
     }
   };
 
-  const filteredItems = items
-    .filter((k) => activeTab === "all" || k.status === activeTab)
-    .filter((k) => !searchQuery || k.title.includes(searchQuery) || k.problemDescription.includes(searchQuery));
-
-  return (
-    <div className="min-h-screen flex flex-col">
-      <TopBar title="دانش سازمانی" />
-
-      <div className="flex-1 p-6">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-4">
-            <div className="relative">
-              <Search size={18} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                placeholder="جستجو در تجربیات..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-4 pr-10 py-2 bg-[#17211D] border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500/50 w-64"
-              />
-            </div>
-          </div>
-          <Button className="gap-2" onClick={() => setShowForm(!showForm)}>
-            <Plus size={18} />
-            ثبت تجربه جدید
-          </Button>
-        </div>
-
-        {showForm && <KnowledgeForm onSubmit={() => { setShowForm(false); fetchItems(); }} onCancel={() => setShowForm(false)} />}
-
-        <div className="flex gap-2 mb-6 border-b border-white/10 pb-3">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={cn(
-                "px-4 py-2 rounded-lg text-sm transition-colors",
-                activeTab === tab.id
-                  ? "bg-emerald-500/20 text-emerald-400"
-                  : "text-gray-400 hover:bg-white/5 hover:text-white"
-              )}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        {loading ? (
-          <div className="text-center py-12 text-gray-400">در حال بارگذاری...</div>
-        ) : filteredItems.length === 0 ? (
-          <EmptyState
-            icon={<Brain size={40} />}
-            title="تجربه‌ای یافت نشد"
-            description="تجربیات و دانش سازمانی خود را ثبت کنید تا همکاران بتوانند از آن استفاده کنند"
-            action={{
-              label: "ثبت تجربه جدید",
-              onClick: () => setShowForm(true),
-            }}
-          />
-        ) : (
-          <div className="space-y-4">
-            {filteredItems.map((item) => (
-              <KnowledgeCard key={item.id} item={item} isAdmin={isAdmin} onChanged={fetchItems} />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function KnowledgeCard({
-  item,
-  isAdmin,
-  onChanged,
-}: {
-  item: KnowledgeItemData;
-  isAdmin: boolean;
-  onChanged: () => void;
-}) {
-  const status = statusConfig[item.status] || statusConfig.DRAFT;
-  const [updating, setUpdating] = useState(false);
-
-  const updateStatus = async (nextStatus: string) => {
-    setUpdating(true);
-    try {
-      const res = await fetch(`/api/knowledge/${item.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      if (res.ok) onChanged();
-    } finally {
-      setUpdating(false);
-    }
-  };
-
-  return (
-    <Card className="p-5 hover:border-emerald-500/30 transition-all">
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-emerald-500/20">
-            <Brain size={20} className="text-emerald-400" />
-          </div>
-          <div>
-            <h3 className="text-white font-medium">{item.title}</h3>
-            <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
-              {item.subject && (
-                <span className="flex items-center gap-1">
-                  <Tag size={12} />
-                  {item.subject}
-                </span>
-              )}
-              <span className="flex items-center gap-1">
-                <Clock size={12} />
-                {getRelativeTime(item.createdAt)}
-              </span>
-            </div>
-          </div>
-        </div>
-        <Badge variant={status.variant}>{status.label}</Badge>
-      </div>
-      <p className="text-sm text-gray-400 line-clamp-2">{item.problemDescription}</p>
-      {item.lessonLearned && (
-        <div className="mt-3 p-3 bg-emerald-500/5 rounded-lg border border-emerald-500/10">
-          <p className="text-xs text-emerald-400 mb-1">درس‌آموخته:</p>
-          <p className="text-sm text-gray-300 line-clamp-2">{item.lessonLearned}</p>
-        </div>
-      )}
-
-      <div className="flex items-center gap-2 mt-4">
-        {item.status === "DRAFT" && (
-          <Button size="sm" variant="outline" className="gap-1" disabled={updating} onClick={() => updateStatus("PENDING")}>
-            <Send size={14} />
-            ارسال برای تأیید
-          </Button>
-        )}
-        {isAdmin && item.status === "PENDING" && (
-          <Button size="sm" variant="outline" className="gap-1" disabled={updating} onClick={() => updateStatus("APPROVED")}>
-            <CheckCircle2 size={14} />
-            تأیید (قابل استفاده در چت)
-          </Button>
-        )}
-        {isAdmin && item.status === "APPROVED" && (
-          <Button size="sm" variant="outline" className="gap-1" disabled={updating} onClick={() => updateStatus("PUBLISHED")}>
-            <Globe2 size={14} />
-            انتشار عمومی
-          </Button>
-        )}
-      </div>
-    </Card>
-  );
-}
-
-function KnowledgeForm({ onSubmit, onCancel }: { onSubmit: () => void; onCancel: () => void }) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [form, setForm] = useState({
-    title: "",
-    subject: "",
-    problemDescription: "",
-    actionTaken: "",
-    result: "",
-    lessonLearned: "",
-    suggestion: "",
-  });
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
     setError("");
+    setSubmitting(true);
+    const tags = form.tags.split(",").map((t) => t.trim()).filter(Boolean);
     try {
       const res = await fetch("/api/knowledge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, tags }),
       });
+      const data = await res.json() as KnowledgeItem & { error?: string };
       if (res.ok) {
-        onSubmit();
+        setItems((prev) => [data, ...prev]);
+        setShowForm(false);
+        setForm({ title: "", subject: "", content: "", tags: "" });
       } else {
-        const data = await res.json();
-        setError(data.error || "خطا");
+        setError(data.error ?? "خطا");
       }
     } catch {
-      setError("خطا در ارتباط با سرور");
+      setError("خطا در اتصال");
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
+  const active = activeId ? items.find((i) => i.id === activeId) : null;
+
   return (
-    <Card className="p-6 mb-6">
-      <h3 className="text-lg font-semibold text-white mb-4">ثبت تجربه جدید</h3>
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">عنوان *</label>
-          <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" required />
+    <div className="h-full flex overflow-hidden">
+      {/* List */}
+      <div className="w-72 flex-shrink-0 border-l border-slate-700 flex flex-col bg-slate-800">
+        <div className="p-4 border-b border-slate-700 flex items-center justify-between">
+          <h1 className="text-white font-semibold text-sm">پایگاه دانش</h1>
+          <button
+            onClick={() => setShowForm(!showForm)}
+            className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1.5 rounded-lg transition-colors"
+          >
+            + افزودن
+          </button>
         </div>
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">موضوع</label>
-          <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" />
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {loading ? (
+            <div className="text-center text-slate-500 text-sm py-6">بارگذاری...</div>
+          ) : items.length === 0 ? (
+            <div className="text-center text-slate-500 text-sm py-6">هنوز موردی ثبت نشده</div>
+          ) : (
+            items.map((item) => {
+              const status = STATUS_LABELS[item.status] ?? { label: item.status, className: "status-draft" };
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setActiveId(item.id === activeId ? null : item.id)}
+                  className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                    activeId === item.id ? "bg-blue-700 text-white" : "text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  <div className="truncate font-medium text-xs">{item.title}</div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className={`text-xs px-1.5 py-0.5 rounded-full ${status.className}`}>
+                      {status.label}
+                    </span>
+                    <span className="text-slate-600 text-xs">{timeAgo(item.createdAt)}</span>
+                  </div>
+                </button>
+              );
+            })
+          )}
         </div>
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">شرح مسئله *</label>
-          <textarea value={form.problemDescription} onChange={(e) => setForm({ ...form, problemDescription: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50 min-h-[80px]" required />
-        </div>
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">اقدام انجام‌شده *</label>
-          <textarea value={form.actionTaken} onChange={(e) => setForm({ ...form, actionTaken: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50 min-h-[80px]" required />
-        </div>
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">نتیجه</label>
-          <input value={form.result} onChange={(e) => setForm({ ...form, result: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" />
-        </div>
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">درس‌آموخته *</label>
-          <textarea value={form.lessonLearned} onChange={(e) => setForm({ ...form, lessonLearned: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50 min-h-[80px]" required />
-        </div>
-        <div>
-          <label className="text-sm text-gray-400 mb-1 block">پیشنهاد</label>
-          <textarea value={form.suggestion} onChange={(e) => setForm({ ...form, suggestion: e.target.value })} className="w-full p-3 bg-[#17211D] border border-white/10 rounded-xl text-white focus:outline-none focus:border-emerald-500/50" />
-        </div>
-        {error && <p className="text-red-400 text-sm">{error}</p>}
-        <div className="flex gap-3">
-          <Button type="submit" loading={loading}>ثبت تجربه</Button>
-          <Button type="button" variant="outline" onClick={onCancel}>انصراف</Button>
-        </div>
-      </form>
-    </Card>
+      </div>
+
+      {/* Main */}
+      <div className="flex-1 overflow-y-auto p-6">
+        {showForm ? (
+          <div className="max-w-2xl mx-auto">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-white text-lg font-semibold">افزودن مطلب دانشی</h2>
+              <button onClick={() => setShowForm(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm text-slate-300 mb-1">عنوان *</label>
+                <input
+                  value={form.title}
+                  onChange={(e) => setForm((p) => ({ ...p, title: e.target.value }))}
+                  required
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-300 mb-1">موضوع</label>
+                <input
+                  value={form.subject}
+                  onChange={(e) => setForm((p) => ({ ...p, subject: e.target.value }))}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-300 mb-1">محتوا *</label>
+                <textarea
+                  value={form.content}
+                  onChange={(e) => setForm((p) => ({ ...p, content: e.target.value }))}
+                  required
+                  rows={6}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white text-sm resize-none focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-300 mb-1">برچسب‌ها (با کاما)</label>
+                <input
+                  value={form.tags}
+                  onChange={(e) => setForm((p) => ({ ...p, tags: e.target.value }))}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              {error && <p className="text-red-400 text-sm">{error}</p>}
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowForm(false)}
+                  className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-2.5 rounded-lg text-sm font-medium"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-2.5 rounded-lg text-sm font-medium"
+                >
+                  {submitting ? "در حال ذخیره..." : "ذخیره"}
+                </button>
+              </div>
+            </form>
+          </div>
+        ) : active ? (
+          <div className="max-w-2xl mx-auto">
+            <h2 className="text-white text-lg font-semibold mb-2">{active.title}</h2>
+            {active.subject && <p className="text-slate-400 text-sm mb-4">موضوع: {active.subject}</p>}
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+              <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">{active.content}</p>
+            </div>
+            <p className="text-slate-600 text-xs mt-3">{timeAgo(active.createdAt)}</p>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="text-5xl mb-4">📚</div>
+            <h2 className="text-white text-lg font-semibold mb-2">پایگاه دانش سازمانی</h2>
+            <p className="text-slate-400 text-sm max-w-sm mb-6">
+              مطالب دانشی را اضافه کنید تا در RAG و چت هوشمند قابل جستجو شوند.
+            </p>
+            <button
+              onClick={() => setShowForm(true)}
+              className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-lg text-sm font-medium"
+            >
+              + افزودن مطلب اول
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

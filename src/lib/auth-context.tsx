@@ -1,122 +1,105 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 
-export interface UserPreferences {
-  theme: "dark" | "light";
-  language: "fa" | "en";
-  calendar: "jalali" | "gregorian";
-}
-
-export interface User {
+interface AuthUser {
   id: string;
   name: string;
   email: string;
   username: string;
-  role: string;
-  department?: string;
-  avatarUrl?: string | null;
+  organizationId: string | null;
+  departmentId: string | null;
+  isSuperadmin: boolean;
+  roles: string[];
   permissions: string[];
-  preferences: UserPreferences;
+  isAdmin: boolean;
 }
 
-interface AuthState {
-  user: User | null;
+interface AuthContextValue {
+  user: AuthUser | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-}
-
-interface AuthContextType extends AuthState {
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
-  refreshUser: () => Promise<void>;
+  refresh: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<AuthState>({
-    user: null,
-    isAuthenticated: false,
-    isLoading: true,
-  });
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const refreshUser = useCallback(async () => {
+  const refresh = useCallback(async () => {
     try {
-      const res = await fetch("/api/auth/me", {
-        credentials: "include",
-      });
+      const res = await fetch("/api/auth/me", { credentials: "include" });
       if (res.ok) {
-        const data = await res.json();
-        setState({
-          user: data.user,
-          isAuthenticated: true,
-          isLoading: false,
-        });
+        const data = await res.json() as AuthUser;
+        setUser(data);
       } else {
-        setState({
-          user: null,
-          isAuthenticated: false,
-          isLoading: false,
-        });
+        setUser(null);
       }
     } catch {
-      setState({
-        user: null,
-        isAuthenticated: false,
-        isLoading: false,
-      });
+      setUser(null);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    refreshUser();
-  }, [refreshUser]);
+    void refresh();
+  }, [refresh]);
 
-  const login = async (username: string, password: string) => {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ username, password }),
-    });
+  const login = useCallback(
+    async (username: string, password: string): Promise<{ success: boolean; error?: string }> => {
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+          credentials: "include",
+        });
+        const data = await res.json() as { success?: boolean; user?: AuthUser; error?: string };
+        if (res.ok && data.user) {
+          setUser(data.user);
+          return { success: true };
+        }
+        return { success: false, error: data.error ?? "خطا در ورود" };
+      } catch {
+        return { success: false, error: "خطا در اتصال به سرور" };
+      }
+    },
+    []
+  );
 
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error || "خطا در ورود به سیستم");
+  const logout = useCallback(async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } catch {
+      // ignore
+    } finally {
+      setUser(null);
     }
-
-    const data = await res.json();
-    setState({
-      user: data.user,
-      isAuthenticated: true,
-      isLoading: false,
-    });
-  };
-
-  const logout = async () => {
-    await fetch("/api/auth/logout", {
-      method: "POST",
-      credentials: "include",
-    });
-    setState({
-      user: null,
-      isAuthenticated: false,
-      isLoading: false,
-    });
-  };
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refreshUser }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isAuthenticated: !!user,
+        isLoading,
+        login,
+        logout,
+        refresh,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
 }
 
-export function useAuth() {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
-  return context;
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  return ctx;
 }

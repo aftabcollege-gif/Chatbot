@@ -1,154 +1,59 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, isNotNull } from "drizzle-orm";
-import { db } from "@/db";
-import { documentChunks, documents, knowledgeItems, departments } from "@/db/schema";
-import { getCurrentUser } from "@/lib/auth-server";
-import { getEmbedding } from "@/lib/embeddings";
-import { cosineSimilarity } from "@/lib/local-embeddings";
+import { getCurrentUser, hasPermission } from "@/lib/auth-server";
+import { PERMISSIONS } from "@/lib/permissions";
+import { getEmbedding } from "@/lib/ai/orchestrator";
+import { hybridSearch } from "@/lib/vector-search";
+import { z } from "zod";
 
-interface SearchResultItem {
-  id: string;
-  type: "document" | "knowledge";
-  title: string;
-  snippet: string;
-  pageNumber?: number | null;
-  section?: string | null;
-  department?: string | null;
-  relevanceScore: number;
-  createdAt: string;
-}
+export const dynamic = "force-dynamic";
 
-function isVisible(
-  visibility: string | null | undefined,
-  rowDepartmentId: string | null | undefined,
-  rowOwnerId: string | null | undefined,
-  departmentId: string | null,
-  userId: string
-): boolean {
-  if (visibility === "organization") return true;
-  if (visibility === "department") return !!departmentId && rowDepartmentId === departmentId;
-  if (visibility === "private") return rowOwnerId === userId;
-  return !visibility;
-}
+const SearchSchema = z.object({
+  query: z.string().min(1).max(500),
+  limit: z.number().int().min(1).max(50).default(10),
+  sourceTypes: z
+    .array(z.enum(["document", "knowledge", "experience"]))
+    .optional(),
+});
 
-function buildSnippet(content: string, query: string, radius = 90): string {
-  const lower = content.toLowerCase();
-  const idx = lower.indexOf(query.toLowerCase().split(/\s+/)[0] ?? "");
-  const start = idx > radius ? idx - radius : 0;
-  const end = Math.min(content.length, (idx > -1 ? idx : 0) + radius * 2);
-  const snippet = content.slice(start, end).trim();
-  return (start > 0 ? "… " : "") + snippet + (end < content.length ? " …" : "");
-}
-
-export async function GET(request: NextRequest) {
+export async function POST(request: NextRequest): Promise<NextResponse> {
   const user = await getCurrentUser(request);
-  if (!user) return NextResponse.json({ error: "غیر مجاز" }, { status: 401 });
-
-  const { searchParams } = new URL(request.url);
-  const query = (searchParams.get("q") || "").trim();
-  const type = searchParams.get("type") || "all";
-  const limit = Math.min(50, Number(searchParams.get("limit") ?? 20));
-
-  if (!query) {
-    return NextResponse.json({ results: [] });
+  if (!user) return NextResponse.json({ error: "احراز هویت الزامی است" }, { status: 401 });
+  if (!hasPermission(user, PERMISSIONS.SEARCH_USE)) {
+    return NextResponse.json({ error: "دسترسی مجاز نیست" }, { status: 403 });
   }
-
   if (!user.organizationId) {
-    return NextResponse.json({ results: [] });
+    return NextResponse.json({ error: "کاربر به سازمانی تعلق ندارد" }, { status: 400 });
   }
 
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "درخواست نامعتبر" }, { status: 400 });
+  }
+
+  const parsed = SearchSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "پارامترهای جستجو نامعتبر است" }, { status: 400 });
+  }
+
+  const { query, limit, sourceTypes } = parsed.data;
+
+  const startMs = Date.now();
   const queryEmbedding = await getEmbedding(query);
-  const results: SearchResultItem[] = [];
 
-  if (type === "all" || type === "document") {
-    const rows = await db
-      .select({
-        id: documentChunks.id,
-        content: documentChunks.content,
-        title: documents.title,
-        pageNumber: documentChunks.pageNumber,
-        section: documentChunks.section,
-        embedding: documentChunks.embedding,
-        visibility: documents.visibility,
-        departmentId: documents.departmentId,
-        ownerId: documents.ownerId,
-        departmentName: departments.name,
-        createdAt: documentChunks.createdAt,
-      })
-      .from(documentChunks)
-      .innerJoin(documents, eq(documents.id, documentChunks.documentId))
-      .leftJoin(departments, eq(departments.id, documents.departmentId))
-      .where(
-        and(
-          eq(documentChunks.organizationId, user.organizationId),
-          isNotNull(documentChunks.embedding),
-          eq(documents.status, "READY")
-        )
-      );
+  const results = await hybridSearch(queryEmbedding, query, {
+    organizationId: user.organizationId,
+    departmentId: user.departmentId,
+    userId: user.id,
+    limit,
+    sourceTypes,
+  });
 
-    for (const row of rows) {
-      if (!isVisible(row.visibility, row.departmentId, row.ownerId, user.departmentId, user.id)) continue;
-      const score = cosineSimilarity(queryEmbedding, (row.embedding as number[]) ?? []);
-      if (score <= 0) continue;
-      results.push({
-        id: row.id,
-        type: "document",
-        title: row.title,
-        snippet: buildSnippet(row.content, query),
-        pageNumber: row.pageNumber,
-        section: row.section,
-        department: row.departmentName,
-        relevanceScore: score,
-        createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
-      });
-    }
-  }
-
-  if (type === "all" || type === "knowledge") {
-    const rows = await db
-      .select({
-        id: knowledgeItems.id,
-        title: knowledgeItems.title,
-        subject: knowledgeItems.subject,
-        problemDescription: knowledgeItems.problemDescription,
-        actionTaken: knowledgeItems.actionTaken,
-        lessonLearned: knowledgeItems.lessonLearned,
-        embedding: knowledgeItems.embedding,
-        visibility: knowledgeItems.visibility,
-        departmentId: knowledgeItems.departmentId,
-        ownerId: knowledgeItems.ownerId,
-        departmentName: departments.name,
-        createdAt: knowledgeItems.createdAt,
-        status: knowledgeItems.status,
-      })
-      .from(knowledgeItems)
-      .leftJoin(departments, eq(departments.id, knowledgeItems.departmentId))
-      .where(
-        and(
-          eq(knowledgeItems.organizationId, user.organizationId),
-          isNotNull(knowledgeItems.embedding)
-        )
-      );
-
-    for (const row of rows) {
-      if (row.status !== "APPROVED" && row.status !== "PUBLISHED") continue;
-      if (!isVisible(row.visibility, row.departmentId, row.ownerId, user.departmentId, user.id)) continue;
-      const score = cosineSimilarity(queryEmbedding, (row.embedding as number[]) ?? []);
-      if (score <= 0) continue;
-      const content = [row.problemDescription, row.actionTaken, row.lessonLearned].filter(Boolean).join(" — ");
-      results.push({
-        id: row.id,
-        type: "knowledge",
-        title: row.title,
-        snippet: buildSnippet(content, query),
-        department: row.departmentName,
-        relevanceScore: score,
-        createdAt: row.createdAt?.toISOString() ?? new Date().toISOString(),
-      });
-    }
-  }
-
-  results.sort((a, b) => b.relevanceScore - a.relevanceScore);
-
-  return NextResponse.json({ results: results.slice(0, limit) });
+  return NextResponse.json({
+    query,
+    results,
+    totalResults: results.length,
+    latencyMs: Date.now() - startMs,
+  });
 }

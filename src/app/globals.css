@@ -1,20 +1,108 @@
 @import "tailwindcss";
 
-@layer base {
-  * {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
-  }
-  *::-webkit-scrollbar { width: 6px; }
-  *::-webkit-scrollbar-track { background: transparent; }
-  *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
-  *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+/* ============================================================
+   RTL Base — Directive §44
+   ============================================================ */
+:root {
+  --font-sans: "Segoe UI", "Tahoma", "Arial", system-ui, sans-serif;
+  --color-primary: #1d4ed8;
+  --color-primary-dark: #1e3a8a;
+  --color-surface: #0f172a;
+  --color-surface-2: #1e293b;
+  --color-surface-3: #334155;
+  --color-border: #334155;
+  --color-text: #f1f5f9;
+  --color-text-muted: #94a3b8;
+  --sidebar-width: 260px;
 }
 
-@layer utilities {
-  .glass-strong {
-    background: rgba(17, 23, 21, 0.9);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
+html, body {
+  direction: rtl;
+  font-family: var(--font-sans);
+  background: var(--color-surface);
+  color: var(--color-text);
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-surface-2);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Focus styles for accessibility */
+*:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* RTL-aware flex utilities */
+.flex-row-rtl {
+  flex-direction: row-reverse;
+}
+
+/* Persian number display */
+.persian-num {
+  font-variant-numeric: normal;
+}
+
+/* Prose for RTL content */
+.prose-rtl {
+  direction: rtl;
+  text-align: right;
+  line-height: 1.8;
+}
+
+/* Status badge colors */
+.status-draft { @apply bg-slate-700 text-slate-300; }
+.status-submitted { @apply bg-blue-900 text-blue-300; }
+.status-review { @apply bg-yellow-900 text-yellow-300; }
+.status-approved { @apply bg-green-900 text-green-300; }
+.status-published { @apply bg-emerald-900 text-emerald-300; }
+.status-archived { @apply bg-slate-800 text-slate-500; }
+.status-failed { @apply bg-red-900 text-red-300; }
+.status-ready { @apply bg-green-900 text-green-300; }
+.status-queued { @apply bg-blue-900 text-blue-300; }
+.status-processing { @apply bg-yellow-900 text-yellow-300; }
+
+/* Source type badges */
+.source-document { @apply bg-blue-900/50 text-blue-300 border border-blue-700; }
+.source-knowledge { @apply bg-purple-900/50 text-purple-300 border border-purple-700; }
+.source-experience { @apply bg-amber-900/50 text-amber-300 border border-amber-700; }
+
+/* Loading animation */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+/* Chat message styles */
+.message-user {
+  background: var(--color-surface-3);
+  border-radius: 12px 12px 4px 12px;
+}
+.message-assistant {
+  background: var(--color-surface-2);
+  border-radius: 12px 12px 12px 4px;
+  border: 1px solid var(--color-border);
 }

@@ -1,294 +1,257 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import { Bot, User, Mail, Lock, Building2, CheckCircle, Sparkles } from "lucide-react";
 
 export default function SetupPage() {
   const router = useRouter();
   const [step, setStep] = useState(1);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState(false);
-
-  const [formData, setFormData] = useState({
-    name: "",
-    email: "",
-    username: "",
-    password: "",
-    confirmPassword: "",
+  const [form, setForm] = useState({
     organizationName: "",
+    adminName: "",
+    adminUsername: "",
+    adminEmail: "",
+    adminPassword: "",
+    adminPasswordConfirm: "",
   });
 
-  const [passwordStrength, setPasswordStrength] = useState(0);
-
-  useEffect(() => {
-    async function checkStatus() {
-      const res = await fetch("/api/setup/status");
-      const data = await res.json();
-      if (data.completed) {
-        router.push("/login");
-      }
-    }
-    checkStatus();
-  }, [router]);
-
-  useEffect(() => {
-    const password = formData.password;
-    let strength = 0;
-    if (password.length >= 8) strength += 25;
-    if (password.length >= 12) strength += 15;
-    if (/[A-Z]/.test(password)) strength += 20;
-    if (/[a-z]/.test(password)) strength += 10;
-    if (/[0-9]/.test(password)) strength += 15;
-    if (/[^A-Za-z0-9]/.test(password)) strength += 15;
-    setPasswordStrength(Math.min(100, strength));
-  }, [formData.password]);
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+    setError("");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
-    if (step === 1) {
-      if (!formData.name || !formData.email) {
-        setError("لطفاً تمام فیلدها را پر کنید");
-        return;
-      }
-      setStep(2);
+    if (form.adminPassword !== form.adminPasswordConfirm) {
+      setError("رمز عبور و تأیید آن یکسان نیستند.");
       return;
     }
 
-    if (step === 2) {
-      if (!formData.username || !formData.password) {
-        setError("لطفاً تمام فیلدها را پر کنید");
-        return;
-      }
-      if (formData.password.length < 8) {
-        setError("رمز عبور باید حداقل ۸ کاراکتر باشد");
-        return;
-      }
-      if (formData.password !== formData.confirmPassword) {
-        setError("رمز عبور و تکرار آن مطابقت ندارند");
-        return;
-      }
-      setStep(3);
+    if (form.adminPassword.length < 8) {
+      setError("رمز عبور باید حداقل ۸ کاراکتر باشد.");
       return;
     }
 
-    setIsLoading(true);
+    setLoading(true);
     try {
-      const res = await fetch("/api/setup/init", {
+      const res = await fetch("/api/setup/initialize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: formData.name,
-          email: formData.email,
-          username: formData.username,
-          password: formData.password,
-          organizationName: formData.organizationName || "سازمان پیش‌فرض",
+          organizationName: form.organizationName,
+          adminName: form.adminName,
+          adminUsername: form.adminUsername,
+          adminEmail: form.adminEmail,
+          adminPassword: form.adminPassword,
         }),
       });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.error || "خطا در راه‌اندازی");
-        return;
+      const data = await res.json() as { success?: boolean; error?: string };
+      if (res.ok && data.success) {
+        setStep(3);
+        setTimeout(() => router.push("/login"), 3000);
+      } else {
+        setError(data.error ?? "خطا در راه‌اندازی");
       }
-
-      setSuccess(true);
-      setTimeout(() => {
-        router.push("/login");
-      }, 2000);
     } catch {
-      setError("خطا در ارتباط با سرور");
+      setError("خطا در اتصال به سرور");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
-  const getStrengthColor = () => {
-    if (passwordStrength < 30) return "bg-red-500";
-    if (passwordStrength < 60) return "bg-yellow-500";
-    return "bg-emerald-500";
-  };
-
-  const getStrengthText = () => {
-    if (passwordStrength < 30) return "ضعیف";
-    if (passwordStrength < 60) return "متوسط";
-    if (passwordStrength < 80) return "قوی";
-    return "بسیار قوی";
-  };
-
-  if (success) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-[#0B0F0E]">
-        <div className="text-center">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-emerald-500/20 mb-6">
-            <CheckCircle className="h-10 w-10 text-emerald-400" />
-          </div>
-          <h2 className="text-2xl font-bold text-white mb-2">راه‌اندازی کامل شد!</h2>
-          <p className="text-emerald-400">در حال انتقال به صفحه ورود...</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-[#0B0F0E]">
-      <div className="absolute inset-0 opacity-30">
-        <div
-          className="absolute w-[600px] h-[600px] rounded-full"
-          style={{
-            background: "radial-gradient(circle, rgba(16,185,129,0.15) 0%, transparent 70%)",
-            top: "-200px",
-            right: "-200px",
-          }}
-        />
-      </div>
-
-      <Card className="w-full max-w-lg relative">
-        <CardHeader className="text-center pb-2">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 mx-auto mb-4">
-            <Bot size={32} className="text-white" />
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <span className="text-3xl">🧠</span>
           </div>
-          <CardTitle className="text-2xl">راه‌اندازی اولیه</CardTitle>
-          <CardDescription className="flex items-center justify-center gap-1">
-            <Sparkles size={14} />
-            سامانه دانش سازمانی
-          </CardDescription>
-        </CardHeader>
+          <h1 className="text-2xl font-bold text-white">راه‌اندازی سامانه</h1>
+          <p className="text-slate-400 mt-2 text-sm">
+            سامانه هوش مصنوعی سازمانی آفلاین
+          </p>
+        </div>
 
-        <CardContent>
-          <div className="mb-8">
-            <div className="flex justify-between text-sm text-gray-400 mb-2">
-              <span>مرحله {step} از ۳</span>
-              <span>{Math.round((step / 3) * 100)}%</span>
+        {step === 3 ? (
+          <div className="bg-slate-800 rounded-2xl p-8 text-center border border-slate-700">
+            <div className="text-5xl mb-4">✅</div>
+            <h2 className="text-xl font-semibold text-white mb-2">
+              راه‌اندازی کامل شد
+            </h2>
+            <p className="text-slate-400 text-sm">
+              در حال انتقال به صفحه ورود...
+            </p>
+          </div>
+        ) : (
+          <form
+            onSubmit={handleSubmit}
+            className="bg-slate-800 rounded-2xl p-8 border border-slate-700 space-y-5"
+          >
+            {/* Step indicator */}
+            <div className="flex items-center gap-2 mb-6">
+              {[1, 2].map((s) => (
+                <div key={s} className="flex-1">
+                  <div
+                    className={`h-1 rounded-full transition-colors ${
+                      s <= step ? "bg-blue-500" : "bg-slate-600"
+                    }`}
+                  />
+                </div>
+              ))}
             </div>
-            <Progress value={(step / 3) * 100} />
-          </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
             {step === 1 && (
-              <div className="space-y-5">
-                <h3 className="text-lg font-medium text-white mb-4">اطلاعات مدیر سیستم</h3>
-                <Input
-                  label="نام کامل"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  icon={<User size={20} />}
-                  autoFocus
-                  required
-                />
-                <Input
-                  type="email"
-                  label="ایمیل"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  icon={<Mail size={20} />}
-                  required
-                />
-              </div>
+              <>
+                <h2 className="text-lg font-semibold text-white">
+                  مرحله ۱: اطلاعات سازمان
+                </h2>
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">
+                    نام سازمان <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    name="organizationName"
+                    value={form.organizationName}
+                    onChange={handleChange}
+                    placeholder="مثال: شرکت برق منطقه‌ای"
+                    required
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!form.organizationName.trim()) {
+                      setError("نام سازمان الزامی است.");
+                      return;
+                    }
+                    setStep(2);
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-lg font-medium transition-colors"
+                >
+                  مرحله بعد
+                </button>
+              </>
             )}
 
             {step === 2 && (
-              <div className="space-y-5">
-                <h3 className="text-lg font-medium text-white mb-4">اطلاعات ورود</h3>
-                <Input
-                  label="نام کاربری"
-                  value={formData.username}
-                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  icon={<User size={20} />}
-                  autoFocus
-                  required
-                />
+              <>
+                <h2 className="text-lg font-semibold text-white">
+                  مرحله ۲: حساب مدیر ارشد
+                </h2>
                 <div>
-                  <Input
-                    type="password"
-                    label="رمز عبور (حداقل ۸ کاراکتر)"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    icon={<Lock size={20} />}
+                  <label className="block text-sm text-slate-300 mb-1">
+                    نام و نام خانوادگی <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    name="adminName"
+                    value={form.adminName}
+                    onChange={handleChange}
+                    placeholder="نام کامل"
                     required
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                   />
-                  {formData.password && (
-                    <div className="mt-2 flex items-center gap-3">
-                      <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full transition-all duration-300 ${getStrengthColor()}`}
-                          style={{ width: `${passwordStrength}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-gray-400">{getStrengthText()}</span>
-                    </div>
-                  )}
                 </div>
-                <Input
-                  type="password"
-                  label="تکرار رمز عبور"
-                  value={formData.confirmPassword}
-                  onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                  icon={<Lock size={20} />}
-                  success={formData.confirmPassword.length > 0 && formData.password === formData.confirmPassword}
-                  required
-                />
-              </div>
-            )}
-
-            {step === 3 && (
-              <div className="space-y-5">
-                <h3 className="text-lg font-medium text-white mb-4">اطلاعات سازمان</h3>
-                <Input
-                  label="نام سازمان (اختیاری)"
-                  value={formData.organizationName}
-                  onChange={(e) => setFormData({ ...formData, organizationName: e.target.value })}
-                  icon={<Building2 size={20} />}
-                  autoFocus
-                />
-                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4">
-                  <h4 className="font-medium text-emerald-300 mb-2">خلاصه تنظیمات:</h4>
-                  <ul className="text-sm text-gray-300 space-y-1">
-                    <li>👤 مدیر: {formData.name}</li>
-                    <li>📧 ایمیل: {formData.email}</li>
-                    <li>🔑 نام کاربری: {formData.username}</li>
-                    <li>🏢 سازمان: {formData.organizationName || "سازمان پیش‌فرض"}</li>
-                  </ul>
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">
+                    نام کاربری <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    name="adminUsername"
+                    value={form.adminUsername}
+                    onChange={handleChange}
+                    placeholder="فقط حروف انگلیسی و عدد"
+                    pattern="[a-zA-Z0-9_]+"
+                    required
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
                 </div>
-              </div>
-            )}
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">
+                    ایمیل <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    name="adminEmail"
+                    type="email"
+                    value={form.adminEmail}
+                    onChange={handleChange}
+                    placeholder="admin@example.com"
+                    required
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">
+                    رمز عبور <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    name="adminPassword"
+                    type="password"
+                    value={form.adminPassword}
+                    onChange={handleChange}
+                    placeholder="حداقل ۸ کاراکتر"
+                    required
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">
+                    تأیید رمز عبور <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    name="adminPasswordConfirm"
+                    type="password"
+                    value={form.adminPasswordConfirm}
+                    onChange={handleChange}
+                    placeholder="رمز عبور را دوباره وارد کنید"
+                    required
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
 
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-red-400 text-sm">
-                {error}
-              </div>
-            )}
+                {error && (
+                  <p className="text-red-400 text-sm bg-red-900/20 px-3 py-2 rounded-lg">
+                    {error}
+                  </p>
+                )}
 
-            <div className="flex gap-3">
-              {step > 1 && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setStep(step - 1)}
-                  className="flex-1"
-                >
-                  مرحله قبل
-                </Button>
-              )}
-              <Button
-                type="submit"
-                className="flex-1"
-                loading={isLoading}
-              >
-                {step < 3 ? "مرحله بعد" : "اتمام راه‌اندازی"}
-              </Button>
-            </div>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setStep(1)}
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-2.5 rounded-lg font-medium transition-colors"
+                  >
+                    قبلی
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white py-2.5 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                  >
+                    {loading ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        در حال راه‌اندازی...
+                      </>
+                    ) : (
+                      "تکمیل راه‌اندازی"
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
           </form>
-        </CardContent>
-      </Card>
+        )}
+
+        <p className="text-center text-slate-600 text-xs mt-6">
+          سامانه هوش مصنوعی سازمانی — نسخه ۱.۰.۰ — کاملاً آفلاین
+        </p>
+      </div>
     </div>
   );
 }
