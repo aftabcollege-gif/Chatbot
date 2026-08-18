@@ -64,6 +64,10 @@ export type AuditEventCode =
   | "BACKUP_RESTORE"
   | "REINDEX_START"
   | "REINDEX_COMPLETE"
+  // Role management events
+  | "ROLE_CREATE"
+  | "ROLE_UPDATE"
+  | "ROLE_DELETE"
   // System events
   | "SYSTEM_START"
   | "SETUP_COMPLETE"

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, or, isNull } from "drizzle-orm";
 import { db } from "@/db";
 import { roles, rolePermissions, permissions, userRoles } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth-server";
@@ -11,7 +11,13 @@ export async function GET(request: NextRequest) {
   if (!current.isAdmin) return NextResponse.json({ error: "دسترسی غیرمجاز" }, { status: 403 });
   if (!current.organizationId) return NextResponse.json({ roles: [], permissions: [] });
 
-  const orgRoles = await db.select().from(roles).where(eq(roles.organizationId, current.organizationId));
+  // Roles visible to an org admin: system-wide roles (organizationId IS NULL,
+  // e.g. SUPER_ADMIN/ORG_ADMIN/EMPLOYEE seeded by seedSystemData) PLUS any
+  // custom roles created specifically for this organization.
+  const orgRoles = await db
+    .select()
+    .from(roles)
+    .where(or(eq(roles.organizationId, current.organizationId), isNull(roles.organizationId)));
   const allPermissions = await db.select().from(permissions);
 
   const allRolePermissions = await db
@@ -69,7 +75,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  await logEvent({ eventCode: "role.create", actorId: current.id, resourceType: "role", resourceId: role.id, resourceName: role.name, request });
+  await logEvent({ eventCode: "ROLE_CREATE", actorId: current.id, resourceType: "role", resourceId: role.id, resourceName: role.name, request });
 
   return NextResponse.json({ role }, { status: 201 });
 }

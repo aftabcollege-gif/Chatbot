@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq, and, isNull } from "drizzle-orm";
 import { db } from "@/db";
-import { experiences, experienceTags, documentChunks } from "@/db/schema";
+import { experiences, experienceTags } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
-import { getEmbedding, getEmbeddings } from "@/lib/ai/orchestrator";
-import { chunkText } from "@/lib/chunking";
+import { getEmbedding } from "@/lib/ai/orchestrator";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -143,16 +142,11 @@ export async function PATCH(
     await indexExperienceForRAG(experience, user.organizationId!);
   } else if (action === "archive") {
     updateData.archivedAt = new Date();
-
-    // Remove from RAG index when archived
-    await db
-      .delete(documentChunks)
-      .where(
-        and(
-          eq(documentChunks.sourceType, "experience"),
-          eq(documentChunks.documentId, id)
-        )
-      );
+    // Archived experiences must disappear from retrieval/RAG immediately
+    // (directive §32/§48). Retrieval reads directly from the `experiences`
+    // table filtered by status = PUBLISHED, so clearing the embedding and
+    // status is sufficient to remove it from search/RAG.
+    updateData.embedding = null;
   }
 
   const [updated] = await db
@@ -177,12 +171,19 @@ export async function PATCH(
 }
 
 /**
- * DIRECTIVE §32: Automatically index a published experience into RAG
- * source_type = "experience" in metadata
+ * DIRECTIVE §32: Automatically index a published experience into RAG.
+ *
+ * Retrieval reads directly from the `experiences` table (see
+ * src/lib/vector-search.ts#searchExperiences), filtered to status = PUBLISHED
+ * and scoped by tenant/visibility, with source_type = "experience" carried
+ * through to citations so the UI can distinguish an employee-submitted
+ * experience from an official document (directive §32 citation requirement).
+ * We (re)compute a fresh embedding over the full, final published content
+ * every time an experience is (re-)published.
  */
 async function indexExperienceForRAG(
   experience: typeof experiences.$inferSelect,
-  organizationId: string
+  _organizationId: string
 ): Promise<void> {
   try {
     const fullText = [
@@ -198,61 +199,16 @@ async function indexExperienceForRAG(
       .filter(Boolean)
       .join("\n\n");
 
-    // Remove existing chunks for this experience
+    const expEmbedding = await getEmbedding(fullText);
     await db
-      .delete(documentChunks)
-      .where(
-        and(
-          eq(documentChunks.documentId, experience.id),
-          eq(documentChunks.sourceType, "experience")
-        )
-      );
+      .update(experiences)
+      .set({ embedding: expEmbedding })
+      .where(eq(experiences.id, experience.id));
 
-    // Chunk the experience content
-    const chunks = chunkText(fullText);
-
-    if (!chunks.length) return;
-
-    // Get embeddings for all chunks
-    const chunkTexts = chunks.map((c) => c.content);
-    const embeddings = await getEmbeddings(chunkTexts);
-
-    // Insert chunks with source_type = "experience"
-    const chunkValues = chunks.map((chunk, i) => ({
-      documentId: experience.id, // Using experience ID as documentId for RAG compatibility
-      organizationId,
-      departmentId: experience.departmentId,
-      chunkIndex: i,
-      content: chunk.content,
-      contentNormalized: chunk.contentNormalized,
-      embedding: embeddings[i],
-      sourceType: "experience",
-      language: "fa",
-      tokenCount: chunk.tokenCount,
-      status: "ACTIVE",
-      metadata: {
-        experienceId: experience.id,
-        experienceTitle: experience.title,
-        importance: experience.importance,
-      },
-    }));
-
-    for (let i = 0; i < chunkValues.length; i += 50) {
-      await db.insert(documentChunks).values(chunkValues.slice(i, i + 50));
-    }
-
-    // Also update the experience embedding if not set
-    if (!experience.embedding) {
-      const expEmbedding = await getEmbedding(fullText);
-      await db
-        .update(experiences)
-        .set({ embedding: expEmbedding })
-        .where(eq(experiences.id, experience.id));
-    }
-
-    console.log(`[Experience RAG] Indexed ${chunkValues.length} chunks for experience ${experience.id}`);
+    console.log(`[Experience RAG] Indexed experience ${experience.id} into RAG`);
   } catch (error) {
     console.error(`[Experience RAG] Failed to index experience ${experience.id}:`, error);
     // Non-fatal — experience is still published, just not searchable via RAG
+    // until the next re-index (directive §48: graceful degradation, not crash).
   }
 }

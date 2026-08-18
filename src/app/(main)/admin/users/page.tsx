@@ -1,26 +1,21 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar } from "@/components/ui/avatar";
-import { Input } from "@/components/ui/input";
 import {
-  Users,
   Plus,
   Search,
   Filter,
-  MoreVertical,
-  Edit3,
   Trash2,
   Key,
   Shield,
   CheckCircle,
   XCircle,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { getRelativeTime } from "@/lib/persian-date";
 
 interface User {
@@ -31,55 +26,91 @@ interface User {
   role: string;
   department: string;
   isActive: boolean;
-  lastLogin: string;
-  createdAt: string;
+  lastLogin: string | null;
+  createdAt?: string;
 }
 
-const mockUsers: User[] = [
-  {
-    id: "1",
-    name: "علی رضایی",
-    email: "ali.rezaei@company.com",
-    username: "ali.rezaei",
-    role: "admin",
-    department: "فناوری اطلاعات",
-    isActive: true,
-    lastLogin: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    createdAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "2",
-    name: "سارا احمدی",
-    email: "sara.ahmadi@company.com",
-    username: "sara.ahmadi",
-    role: "user",
-    department: "واحد تولید",
-    isActive: true,
-    lastLogin: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    createdAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "3",
-    name: "محمد کریمی",
-    email: "m.karimi@company.com",
-    username: "m.karimi",
-    role: "manager",
-    department: "واحد مالی",
-    isActive: false,
-    lastLogin: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-    createdAt: new Date(Date.now() - 120 * 24 * 60 * 60 * 1000).toISOString(),
-  },
-];
-
 const roleConfig: Record<string, { label: string; variant: "default" | "success" | "warning" | "info" }> = {
+  SUPER_ADMIN: { label: "مدیر ارشد سیستم", variant: "success" },
+  ORG_ADMIN: { label: "مدیر سازمان", variant: "success" },
+  DEPARTMENT_MANAGER: { label: "مدیر واحد", variant: "info" },
+  KNOWLEDGE_MANAGER: { label: "مدیر دانش", variant: "info" },
+  REVIEWER: { label: "بازبین", variant: "warning" },
+  EMPLOYEE: { label: "کارمند", variant: "default" },
+  VIEWER: { label: "بیننده", variant: "default" },
   admin: { label: "مدیر سیستم", variant: "success" },
-  manager: { label: "مدیر واحد", variant: "info" },
   user: { label: "کاربر", variant: "default" },
 };
 
 export default function UsersPage() {
-  const [users] = useState<User[]>(mockUsers);
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ name: "", email: "", username: "", password: "" });
+
+  const loadUsers = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/users", { credentials: "include" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "خطا در دریافت کاربران");
+      }
+      const data = (await res.json()) as { items: User[] };
+      setUsers(data.items ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطا در ارتباط با سرور");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreating(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(form),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "خطا در ایجاد کاربر");
+      setShowCreate(false);
+      setForm({ name: "", email: "", username: "", password: "" });
+      await loadUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطا در ارتباط با سرور");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleToggleActive = async (user: User) => {
+    await fetch(`/api/admin/users/${user.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ isActive: !user.isActive }),
+    });
+    await loadUsers();
+  };
+
+  const handleDelete = async (user: User) => {
+    if (!confirm(`آیا از حذف کاربر «${user.name}» مطمئن هستید؟`)) return;
+    await fetch(`/api/admin/users/${user.id}`, { method: "DELETE", credentials: "include" });
+    await loadUsers();
+  };
 
   const filteredUsers = users.filter(
     (user) =>
@@ -114,11 +145,63 @@ export default function UsersPage() {
               فیلتر
             </Button>
           </div>
-          <Button className="gap-2">
+          <Button className="gap-2" onClick={() => setShowCreate((v) => !v)}>
             <Plus size={18} />
             کاربر جدید
           </Button>
         </div>
+
+        {error && (
+          <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            {error}
+          </div>
+        )}
+
+        {showCreate && (
+          <Card className="p-4 mb-6">
+            <form onSubmit={handleCreate} className="grid grid-cols-2 gap-3">
+              <input
+                required
+                placeholder="نام و نام خانوادگی"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                className="bg-[#17211D] border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+              />
+              <input
+                required
+                type="email"
+                placeholder="ایمیل"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                className="bg-[#17211D] border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+              />
+              <input
+                required
+                placeholder="نام کاربری"
+                value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value })}
+                className="bg-[#17211D] border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+              />
+              <input
+                required
+                type="password"
+                minLength={8}
+                placeholder="رمز عبور (حداقل ۸ کاراکتر)"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                className="bg-[#17211D] border border-white/10 rounded-lg px-3 py-2 text-white text-sm"
+              />
+              <div className="col-span-2 flex gap-2 justify-end">
+                <Button type="button" variant="outline" onClick={() => setShowCreate(false)}>
+                  انصراف
+                </Button>
+                <Button type="submit" loading={creating}>
+                  ایجاد کاربر
+                </Button>
+              </div>
+            </form>
+          </Card>
+        )}
 
         {/* Users Table */}
         <Card>
@@ -147,6 +230,20 @@ export default function UsersPage() {
                 </tr>
               </thead>
               <tbody>
+                {loading && (
+                  <tr>
+                    <td colSpan={6} className="p-6 text-center text-gray-500">
+                      در حال بارگذاری...
+                    </td>
+                  </tr>
+                )}
+                {!loading && filteredUsers.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="p-6 text-center text-gray-500">
+                      کاربری یافت نشد
+                    </td>
+                  </tr>
+                )}
                 {filteredUsers.map((user) => (
                   <tr
                     key={user.id}
@@ -168,33 +265,42 @@ export default function UsersPage() {
                     </td>
                     <td className="p-4 text-gray-300">{user.department}</td>
                     <td className="p-4">
-                      {user.isActive ? (
-                        <span className="flex items-center gap-1 text-emerald-400 text-sm">
-                          <CheckCircle size={14} />
-                          فعال
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-red-400 text-sm">
-                          <XCircle size={14} />
-                          غیرفعال
-                        </span>
-                      )}
+                      <button
+                        onClick={() => void handleToggleActive(user)}
+                        className="flex items-center gap-1"
+                        title="تغییر وضعیت فعال/غیرفعال"
+                      >
+                        {user.isActive ? (
+                          <span className="flex items-center gap-1 text-emerald-400 text-sm">
+                            <CheckCircle size={14} />
+                            فعال
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 text-red-400 text-sm">
+                            <XCircle size={14} />
+                            غیرفعال
+                          </span>
+                        )}
+                      </button>
                     </td>
                     <td className="p-4 text-sm text-gray-400">
-                      {getRelativeTime(user.lastLogin)}
+                      {user.lastLogin ? getRelativeTime(user.lastLogin) : "—"}
                     </td>
                     <td className="p-4">
                       <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="icon">
-                          <Edit3 size={16} />
-                        </Button>
-                        <Button variant="ghost" size="icon">
+                        <Button variant="ghost" size="icon" title="بازنشانی رمز عبور">
                           <Key size={16} />
                         </Button>
-                        <Button variant="ghost" size="icon">
+                        <Button variant="ghost" size="icon" title="نقش‌ها">
                           <Shield size={16} />
                         </Button>
-                        <Button variant="ghost" size="icon" className="text-red-400">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-red-400"
+                          onClick={() => void handleDelete(user)}
+                          title="حذف کاربر"
+                        >
                           <Trash2 size={16} />
                         </Button>
                       </div>

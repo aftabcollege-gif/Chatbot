@@ -36,7 +36,7 @@ export async function PATCH(
     }
   }
 
-  await logEvent({ eventCode: "role.update", actorId: current.id, resourceType: "role", resourceId: id, resourceName: role.name, request });
+  await logEvent({ eventCode: "ROLE_UPDATE", actorId: current.id, resourceType: "role", resourceId: id, resourceName: role.name, request });
 
   return NextResponse.json({ success: true });
 }
@@ -56,7 +56,7 @@ export async function DELETE(
 
   await db.delete(roles).where(eq(roles.id, id));
 
-  await logEvent({ eventCode: "role.delete", actorId: current.id, resourceType: "role", resourceId: id, request });
+  await logEvent({ eventCode: "ROLE_DELETE", actorId: current.id, resourceType: "role", resourceId: id, request });
 
   return NextResponse.json({ success: true });
 }

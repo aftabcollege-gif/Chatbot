@@ -101,7 +101,7 @@ export default function ProfilePage() {
                 <div className="flex items-center gap-3 mt-3">
                   <Badge variant="success" className="gap-1">
                     <Shield size={12} />
-                    {user?.role === "admin" ? "مدیر سیستم" : "کاربر"}
+                    {user?.isAdmin ? "مدیر سیستم" : (user?.roles?.[0] ?? "کاربر")}
                   </Badge>
                   <span className="text-sm text-gray-500">
                     آخرین ورود: همین الان

@@ -66,7 +66,7 @@ export function Sidebar({
   const { user, logout } = useAuth();
   const [showAdmin, setShowAdmin] = useState(false);
 
-  const isAdmin = user?.role === "admin" || user?.permissions?.includes("*");
+  const isAdmin = !!user?.isAdmin;
 
   const pinnedConversations = conversations.filter((c) => c.isPinned);
   const recentConversations = conversations.filter((c) => !c.isPinned);

@@ -58,3 +58,9 @@ export function toJalaliLong(date: Date | string | null | undefined): string {
   const { jy, jm, jd } = jalaali.toJalaali(d.getFullYear(), d.getMonth() + 1, d.getDate());
   return `${jd} ${MONTH_NAMES_FA[jm - 1]} ${jy}`;
 }
+
+/** Alias — relative time in Persian (used across admin UI) */
+export const getRelativeTime = timeAgo;
+
+/** Alias — full Jalali date + time (used across admin UI) */
+export const formatJalaaliDateTime = toJalaliDateTime;

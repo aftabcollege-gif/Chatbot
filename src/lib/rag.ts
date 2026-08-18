@@ -14,6 +14,7 @@
 import { llmChat } from "@/lib/ai/orchestrator";
 import { getEmbedding } from "@/lib/ai/orchestrator";
 import { hybridSearch, type SearchResult } from "@/lib/vector-search";
+import { getRagSettings } from "@/lib/system-settings";
 
 const SYSTEM_PROMPT = `تو دستیار هوش سازمانی هستی. وظیفه‌ی تو پاسخ دادن بر اساس منابع سازمانی بازیابی‌شده است.
 
@@ -103,7 +104,8 @@ export async function answerWithRag(
   }
 ): Promise<RAGResult> {
   const startMs = Date.now();
-  const limit = options?.limit ?? parseInt(process.env.RAG_TOP_K ?? "8");
+  const ragSettings = await getRagSettings();
+  const limit = options?.limit ?? ragSettings.topK;
 
   // Step 1: Embed the question
   const queryEmbedding = await getEmbedding(question);
@@ -114,6 +116,7 @@ export async function answerWithRag(
     departmentId,
     userId,
     limit: limit * 2, // retrieve more, then filter/rerank
+    minScore: ragSettings.minScore,
     sourceTypes: options?.sourceTypes,
   });
 

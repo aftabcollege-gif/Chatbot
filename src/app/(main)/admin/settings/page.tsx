@@ -1,280 +1,240 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import {
-  Settings,
   Save,
   Cpu,
-  Database,
   Shield,
-  Globe,
-  Clock,
-  FileText,
   Brain,
   AlertTriangle,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
 
-interface SettingGroup {
-  id: string;
-  title: string;
-  description: string;
-  icon: React.ElementType;
-  settings: Setting[];
+interface SystemStatus {
+  ai: {
+    llm: { available: boolean; name: string; isLocal: boolean };
+    embedding: { available: boolean; name: string; isLocal: boolean; dimensions: number };
+  };
+  rag: { topK: number; minScore: number };
+  env: {
+    ollamaBaseUrl: string;
+    llmModel: string;
+    embedModel: string;
+    embeddingDimensions: number;
+    sessionDurationHours: number;
+    maxFileSizeMb: number;
+    allowedFileExtensions: string;
+    offlineMode: boolean;
+  };
 }
-
-interface Setting {
-  key: string;
-  label: string;
-  value: string | number | boolean;
-  type: "text" | "number" | "toggle" | "select";
-  options?: { value: string; label: string }[];
-  description?: string;
-}
-
-const settingGroups: SettingGroup[] = [
-  {
-    id: "llm",
-    title: "مدل زبانی (LLM)",
-    description: "تنظیمات مدل زبانی محلی",
-    icon: Cpu,
-    settings: [
-      {
-        key: "LLM_MODEL_NAME",
-        label: "نام مدل",
-        value: "qwen2.5-14b-instruct-q4_k_m",
-        type: "text",
-      },
-      {
-        key: "LLM_CONTEXT_SIZE",
-        label: "اندازه Context",
-        value: 8192,
-        type: "number",
-      },
-      {
-        key: "LLM_TEMPERATURE",
-        label: "Temperature",
-        value: 0.1,
-        type: "number",
-      },
-      {
-        key: "LLM_MAX_TOKENS",
-        label: "حداکثر توکن خروجی",
-        value: 2048,
-        type: "number",
-      },
-    ],
-  },
-  {
-    id: "rag",
-    title: "RAG",
-    description: "تنظیمات بازیابی و تولید",
-    icon: Brain,
-    settings: [
-      {
-        key: "CONTEXT_MAX_TOKENS",
-        label: "حداکثر توکن Context",
-        value: 4096,
-        type: "number",
-      },
-      {
-        key: "RETRIEVAL_TOP_K",
-        label: "تعداد نتایج اولیه",
-        value: 20,
-        type: "number",
-      },
-      {
-        key: "RERANKER_TOP_K",
-        label: "تعداد نتایج بعد از Rerank",
-        value: 5,
-        type: "number",
-      },
-      {
-        key: "CHUNK_SIZE",
-        label: "اندازه Chunk",
-        value: 512,
-        type: "number",
-      },
-    ],
-  },
-  {
-    id: "security",
-    title: "امنیت",
-    description: "تنظیمات امنیتی سیستم",
-    icon: Shield,
-    settings: [
-      {
-        key: "OFFLINE_MODE",
-        label: "حالت آفلاین",
-        value: true,
-        type: "toggle",
-        description: "قطع کامل دسترسی به اینترنت",
-      },
-      {
-        key: "JWT_EXPIRY_MINUTES",
-        label: "مدت اعتبار توکن (دقیقه)",
-        value: 60,
-        type: "number",
-      },
-      {
-        key: "MAX_FILE_SIZE_MB",
-        label: "حداکثر حجم فایل (MB)",
-        value: 100,
-        type: "number",
-      },
-    ],
-  },
-];
 
 export default function SettingsPage() {
-  const [activeGroup, setActiveGroup] = useState("llm");
-  const [settings, setSettings] = useState<Record<string, string | number | boolean>>(() => {
-    const initial: Record<string, string | number | boolean> = {};
-    settingGroups.forEach((group) => {
-      group.settings.forEach((setting) => {
-        initial[setting.key] = setting.value;
+  const [status, setStatus] = useState<SystemStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [topK, setTopK] = useState(8);
+  const [minScore, setMinScore] = useState(0.1);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/system", { credentials: "include" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "خطا در دریافت وضعیت سیستم");
+      }
+      const data = (await res.json()) as SystemStatus;
+      setStatus(data);
+      setTopK(data.rag.topK);
+      setMinScore(data.rag.minScore);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطا در ارتباط با سرور");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/system", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ topK, minScore }),
       });
-    });
-    return initial;
-  });
-  const [hasChanges, setHasChanges] = useState(false);
-
-  const handleSettingChange = (key: string, value: string | number | boolean) => {
-    setSettings((prev) => ({ ...prev, [key]: value }));
-    setHasChanges(true);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "خطا در ذخیره تنظیمات");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطا در ارتباط با سرور");
+    } finally {
+      setSaving(false);
+    }
   };
-
-  const handleSave = () => {
-    // Save settings to backend
-    console.log("Saving settings:", settings);
-    setHasChanges(false);
-  };
-
-  const currentGroup = settingGroups.find((g) => g.id === activeGroup);
 
   return (
     <div className="min-h-screen flex flex-col">
       <TopBar title="تنظیمات سیستم" showModelStatus={false} />
 
-      <div className="flex-1 p-6">
-        {/* Warning Banner */}
-        <div className="mb-6 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center gap-3">
+      <div className="flex-1 p-6 space-y-6">
+        <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center gap-3">
           <AlertTriangle size={20} className="text-yellow-400 shrink-0" />
-          <div>
-            <p className="text-yellow-300 text-sm font-medium">
-              تغییر تنظیمات ممکن است نیاز به راه‌اندازی مجدد سرویس‌ها داشته باشد
-            </p>
-          </div>
+          <p className="text-yellow-300 text-sm font-medium">
+            پیکربندی مدل‌های محلی (LLM/Embedding) از طریق متغیرهای محیطی سرور
+            انجام می‌شود و نیازمند راه‌اندازی مجدد سرویس است — این یک محدودیت
+            امنیتی عمدی است تا هیچ مدلی بدون تأیید Checksum/مجوز جایگزین نشود.
+          </p>
         </div>
 
-        <div className="flex gap-6">
-          {/* Sidebar */}
-          <div className="w-64 shrink-0">
-            <nav className="space-y-1">
-              {settingGroups.map((group) => (
-                <button
-                  key={group.id}
-                  onClick={() => setActiveGroup(group.id)}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-colors text-right",
-                    activeGroup === group.id
-                      ? "bg-emerald-500/15 text-emerald-400"
-                      : "text-gray-400 hover:bg-white/5 hover:text-white"
-                  )}
-                >
-                  <group.icon size={20} />
-                  <span>{group.title}</span>
-                </button>
-              ))}
-            </nav>
+        {error && (
+          <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            {error}
           </div>
+        )}
 
-          {/* Content */}
-          <div className="flex-1">
-            {currentGroup && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <currentGroup.icon size={20} className="text-emerald-400" />
-                    {currentGroup.title}
-                  </CardTitle>
-                  <CardDescription>{currentGroup.description}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  {currentGroup.settings.map((setting) => (
-                    <div key={setting.key} className="flex items-center justify-between">
-                      <div>
-                        <label className="text-white font-medium">
-                          {setting.label}
-                        </label>
-                        {setting.description && (
-                          <p className="text-sm text-gray-500">{setting.description}</p>
-                        )}
-                        <code className="text-xs text-gray-600 bg-white/5 px-1 rounded">
-                          {setting.key}
-                        </code>
-                      </div>
-                      <div className="w-48">
-                        {setting.type === "toggle" ? (
-                          <button
-                            onClick={() =>
-                              handleSettingChange(setting.key, !settings[setting.key])
-                            }
-                            className={cn(
-                              "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
-                              settings[setting.key]
-                                ? "bg-emerald-500"
-                                : "bg-gray-600"
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                                settings[setting.key] ? "translate-x-1" : "translate-x-6"
-                              )}
-                            />
-                          </button>
-                        ) : setting.type === "number" ? (
-                          <input
-                            type="number"
-                            value={settings[setting.key] as number}
-                            onChange={(e) =>
-                              handleSettingChange(setting.key, parseFloat(e.target.value))
-                            }
-                            className="w-full px-3 py-2 bg-[#17211D] border border-white/10 rounded-lg text-white focus:outline-none focus:border-emerald-500/50"
-                          />
-                        ) : (
-                          <input
-                            type="text"
-                            value={settings[setting.key] as string}
-                            onChange={(e) =>
-                              handleSettingChange(setting.key, e.target.value)
-                            }
-                            className="w-full px-3 py-2 bg-[#17211D] border border-white/10 rounded-lg text-white focus:outline-none focus:border-emerald-500/50"
-                          />
-                        )}
-                      </div>
-                    </div>
-                  ))}
+        {loading && <p className="text-gray-500">در حال بارگذاری وضعیت واقعی سیستم...</p>}
 
-                  {hasChanges && (
-                    <div className="pt-6 border-t border-white/10 flex justify-end">
-                      <Button onClick={handleSave} className="gap-2">
-                        <Save size={16} />
-                        ذخیره تغییرات
-                      </Button>
-                    </div>
+        {status && (
+          <>
+            {/* AI Status — REAL, live-queried */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Cpu size={20} className="text-emerald-400" />
+                  وضعیت هوش مصنوعی محلی (زنده)
+                </CardTitle>
+                <CardDescription>
+                  این مقادیر مستقیماً از بررسی زنده‌ی Ollama محلی به‌دست می‌آیند — هیچ داده‌ی ساختگی نیست.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between p-4 rounded-xl border border-white/10 bg-white/5">
+                  <div>
+                    <p className="text-white font-medium">مدل زبانی (LLM)</p>
+                    <code className="text-xs text-gray-500">{status.ai.llm.name}</code>
+                  </div>
+                  {status.ai.llm.available ? (
+                    <Badge variant="success" className="gap-1">
+                      <CheckCircle2 size={12} /> در دسترس
+                    </Badge>
+                  ) : (
+                    <Badge variant="error" className="gap-1">
+                      <XCircle size={12} /> در دسترس نیست
+                    </Badge>
                   )}
-                </CardContent>
-              </Card>
-            )}
-          </div>
-        </div>
+                </div>
+                <div className="flex items-center justify-between p-4 rounded-xl border border-white/10 bg-white/5">
+                  <div>
+                    <p className="text-white font-medium">مدل Embedding</p>
+                    <code className="text-xs text-gray-500">
+                      {status.ai.embedding.name} ({status.ai.embedding.dimensions} بعد)
+                    </code>
+                  </div>
+                  {status.ai.embedding.available ? (
+                    <Badge variant="success" className="gap-1">
+                      <CheckCircle2 size={12} /> در دسترس (معنایی واقعی)
+                    </Badge>
+                  ) : (
+                    <Badge variant="warning" className="gap-1">
+                      حالت واژگانی محلی (Fallback)
+                    </Badge>
+                  )}
+                </div>
+                {!status.ai.llm.available && (
+                  <p className="text-xs text-gray-500">
+                    برای فعال‌سازی مدل زبانی محلی، Ollama را روی همین سرور
+                    نصب و مدل «{status.env.llmModel}» را pull کنید (بدون
+                    اتصال به هیچ سرویس ابری). تا آن زمان، چت در حالت
+                    «فقط بازیابی» با استناد مستقیم به منابع کار می‌کند.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* RAG tuning — REAL, persisted to system_settings table */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Brain size={20} className="text-emerald-400" />
+                  تنظیمات بازیابی (RAG)
+                </CardTitle>
+                <CardDescription>این مقادیر واقعاً در پایگاه‌داده ذخیره و توسط موتور RAG استفاده می‌شوند.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-white font-medium">تعداد نتایج بازیابی (Top K)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={topK}
+                    onChange={(e) => setTopK(parseInt(e.target.value) || 1)}
+                    className="w-32 px-3 py-2 bg-[#17211D] border border-white/10 rounded-lg text-white focus:outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <label className="text-white font-medium">حداقل امتیاز مرتبط بودن</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={minScore}
+                    onChange={(e) => setMinScore(parseFloat(e.target.value) || 0)}
+                    className="w-32 px-3 py-2 bg-[#17211D] border border-white/10 rounded-lg text-white focus:outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+                <div className="pt-4 border-t border-white/10 flex justify-end">
+                  <Button onClick={() => void handleSave()} loading={saving} className="gap-2">
+                    <Save size={16} />
+                    ذخیره تغییرات
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Read-only env config */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Shield size={20} className="text-emerald-400" />
+                  پیکربندی سطح سرویس (فقط خواندنی)
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="text-gray-500">حالت آفلاین</p>
+                  <p className="text-white">{status.env.offlineMode ? "فعال (بدون هیچ فراخوانی ابری)" : "غیرفعال"}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">مدت اعتبار نشست</p>
+                  <p className="text-white">{status.env.sessionDurationHours} ساعت</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">حداکثر حجم فایل</p>
+                  <p className="text-white">{status.env.maxFileSizeMb} مگابایت</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">فرمت‌های مجاز</p>
+                  <p className="text-white">{status.env.allowedFileExtensions}</p>
+                </div>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </div>
   );

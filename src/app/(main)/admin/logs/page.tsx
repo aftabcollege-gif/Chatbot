@@ -1,16 +1,12 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { TopBar } from "@/components/layout/TopBar";
 import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   FileText,
   Search,
-  Filter,
-  Download,
-  User,
   Eye,
   Upload,
   LogIn,
@@ -19,7 +15,6 @@ import {
   Edit3,
   Shield,
   AlertTriangle,
-  Calendar,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatJalaaliDateTime } from "@/lib/persian-date";
@@ -27,80 +22,65 @@ import { formatJalaaliDateTime } from "@/lib/persian-date";
 interface AuditLog {
   id: string;
   eventCode: string;
-  actorName: string;
-  resourceType: string;
-  resourceName: string;
-  ipAddress: string;
+  actorName: string | null;
+  resourceType: string | null;
+  resourceName: string | null;
+  ipAddress: string | null;
+  outcome: string | null;
   createdAt: string;
 }
 
 const eventConfig: Record<string, { icon: React.ElementType; color: string; label: string }> = {
-  "auth.login": { icon: LogIn, color: "text-emerald-400", label: "ورود" },
-  "auth.logout": { icon: LogOut, color: "text-gray-400", label: "خروج" },
-  "auth.login_failed": { icon: AlertTriangle, color: "text-red-400", label: "ورود ناموفق" },
-  "document.view": { icon: Eye, color: "text-blue-400", label: "مشاهده" },
-  "document.upload": { icon: Upload, color: "text-purple-400", label: "بارگذاری" },
-  "document.delete": { icon: Trash2, color: "text-red-400", label: "حذف" },
-  "user.update": { icon: Edit3, color: "text-yellow-400", label: "ویرایش کاربر" },
-  "permission.change": { icon: Shield, color: "text-orange-400", label: "تغییر مجوز" },
+  LOGIN: { icon: LogIn, color: "text-emerald-400", label: "ورود کرد" },
+  FAILED_LOGIN: { icon: AlertTriangle, color: "text-red-400", label: "تلاش ورود ناموفق" },
+  LOGOUT: { icon: LogOut, color: "text-gray-400", label: "خارج شد" },
+  DOCUMENT_UPLOAD: { icon: Upload, color: "text-purple-400", label: "بارگذاری کرد" },
+  DOCUMENT_VIEW: { icon: Eye, color: "text-blue-400", label: "مشاهده کرد" },
+  DOCUMENT_DELETE: { icon: Trash2, color: "text-red-400", label: "حذف کرد" },
+  USER_CREATE: { icon: Edit3, color: "text-yellow-400", label: "ایجاد کاربر" },
+  USER_UPDATE: { icon: Edit3, color: "text-yellow-400", label: "ویرایش کاربر" },
+  USER_DELETE: { icon: Trash2, color: "text-red-400", label: "حذف کاربر" },
+  ROLE_CREATE: { icon: Shield, color: "text-orange-400", label: "ایجاد نقش" },
+  ROLE_UPDATE: { icon: Shield, color: "text-orange-400", label: "ویرایش نقش" },
+  ROLE_DELETE: { icon: Shield, color: "text-orange-400", label: "حذف نقش" },
+  KNOWLEDGE_PUBLISH: { icon: FileText, color: "text-emerald-400", label: "انتشار دانش" },
+  EXPERIENCE_PUBLISH: { icon: FileText, color: "text-emerald-400", label: "انتشار تجربه" },
+  SETUP_COMPLETE: { icon: Shield, color: "text-emerald-400", label: "راه‌اندازی سیستم" },
 };
 
-const mockLogs: AuditLog[] = [
-  {
-    id: "1",
-    eventCode: "document.view",
-    actorName: "علی رضایی",
-    resourceType: "document",
-    resourceName: "SOP.pdf",
-    ipAddress: "192.168.1.10",
-    createdAt: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "2",
-    eventCode: "permission.change",
-    actorName: "مدیر سیستم",
-    resourceType: "folder",
-    resourceName: "پوشه مالی",
-    ipAddress: "192.168.1.1",
-    createdAt: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "3",
-    eventCode: "auth.login",
-    actorName: "سارا احمدی",
-    resourceType: "",
-    resourceName: "",
-    ipAddress: "192.168.1.25",
-    createdAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "4",
-    eventCode: "auth.login_failed",
-    actorName: "unknown",
-    resourceType: "",
-    resourceName: "",
-    ipAddress: "192.168.1.99",
-    createdAt: new Date(Date.now() - 22 * 60 * 1000).toISOString(),
-  },
-  {
-    id: "5",
-    eventCode: "document.upload",
-    actorName: "محمد کریمی",
-    resourceType: "document",
-    resourceName: "Report-Q4.xlsx",
-    ipAddress: "192.168.1.15",
-    createdAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-  },
-];
-
 export default function LogsPage() {
-  const [logs] = useState<AuditLog[]>(mockLogs);
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/audit?limit=100", { credentials: "include" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? "خطا در دریافت لاگ‌ها");
+      }
+      const data = (await res.json()) as AuditLog[];
+      setLogs(data ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطا در ارتباط با سرور");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLogs();
+  }, [loadLogs]);
 
   const filteredLogs = logs.filter(
     (log) =>
-      log.actorName.includes(searchQuery) ||
-      log.resourceName.includes(searchQuery)
+      (log.actorName ?? "").includes(searchQuery) ||
+      (log.resourceName ?? "").includes(searchQuery) ||
+      log.eventCode.includes(searchQuery.toUpperCase())
   );
 
   return (
@@ -124,28 +104,22 @@ export default function LogsPage() {
                 className="pl-4 pr-10 py-2 bg-[#17211D] border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500/50 w-64"
               />
             </div>
-            <Button variant="outline" className="gap-2">
-              <Filter size={16} />
-              نوع رویداد
-            </Button>
-            <Button variant="outline" className="gap-2">
-              <User size={16} />
-              کاربر
-            </Button>
-            <Button variant="outline" className="gap-2">
-              <Calendar size={16} />
-              تاریخ
-            </Button>
           </div>
-          <Button variant="outline" className="gap-2">
-            <Download size={16} />
-            دانلود CSV
-          </Button>
         </div>
+
+        {error && (
+          <div className="mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            {error}
+          </div>
+        )}
 
         {/* Logs List */}
         <Card>
           <div className="divide-y divide-white/5">
+            {loading && <div className="p-6 text-center text-gray-500">در حال بارگذاری...</div>}
+            {!loading && filteredLogs.length === 0 && (
+              <div className="p-6 text-center text-gray-500">رویدادی یافت نشد</div>
+            )}
             {filteredLogs.map((log) => {
               const config = eventConfig[log.eventCode] || {
                 icon: FileText,
@@ -164,7 +138,7 @@ export default function LogsPage() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-white">
-                      کاربر «<span className="text-emerald-400">{log.actorName}</span>»
+                      کاربر «<span className="text-emerald-400">{log.actorName ?? "ناشناس"}</span>»
                       {log.resourceName && (
                         <>
                           {" "}
@@ -177,13 +151,13 @@ export default function LogsPage() {
                     <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
                       <span>{formatJalaaliDateTime(log.createdAt)}</span>
                       <span>•</span>
-                      <span>IP: {log.ipAddress}</span>
+                      <span>IP: {log.ipAddress ?? "—"}</span>
                     </div>
                   </div>
-                  {log.eventCode === "auth.login_failed" && (
+                  {log.outcome === "FAILURE" && (
                     <Badge variant="warning">
                       <AlertTriangle size={12} className="ml-1" />
-                      هشدار
+                      ناموفق
                     </Badge>
                   )}
                 </div>

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq, and } from "drizzle-orm";
+import { eq, and, or, isNull } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { db } from "@/db";
 import { users, roles, userRoles } from "@/db/schema";
@@ -36,7 +36,12 @@ export async function PATCH(
     const [role] = await db
       .select()
       .from(roles)
-      .where(and(eq(roles.organizationId, current.organizationId), eq(roles.name, roleName)))
+      .where(
+        and(
+          or(eq(roles.organizationId, current.organizationId), isNull(roles.organizationId)),
+          eq(roles.name, roleName)
+        )
+      )
       .limit(1);
     if (role) {
       await db.delete(userRoles).where(eq(userRoles.userId, id));
@@ -45,7 +50,7 @@ export async function PATCH(
   }
 
   await logEvent({
-    eventCode: "user.update",
+    eventCode: "USER_UPDATE",
     actorId: current.id,
     resourceType: "user",
     resourceId: id,
@@ -73,7 +78,7 @@ export async function DELETE(
   await db.delete(users).where(eq(users.id, id));
 
   await logEvent({
-    eventCode: "user.delete",
+    eventCode: "USER_DELETE",
     actorId: current.id,
     resourceType: "user",
     resourceId: id,

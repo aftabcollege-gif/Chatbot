@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, or, isNull, and } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { db } from "@/db";
 import { users, roles, userRoles, departments } from "@/db/schema";
@@ -85,19 +85,24 @@ export async function POST(request: NextRequest) {
     })
     .returning();
 
-  const desiredRole = roleName || "user";
+  const desiredRole = roleName || "EMPLOYEE";
   const [role] = await db
     .select()
     .from(roles)
-    .where(eq(roles.organizationId, current.organizationId))
-    .then((list) => list.filter((r) => r.name === desiredRole));
+    .where(
+      and(
+        or(eq(roles.organizationId, current.organizationId), isNull(roles.organizationId)),
+        eq(roles.name, desiredRole)
+      )
+    )
+    .limit(1);
 
   if (role) {
     await db.insert(userRoles).values({ userId: newUser.id, roleId: role.id });
   }
 
   await logEvent({
-    eventCode: "user.create",
+    eventCode: "USER_CREATE",
     actorId: current.id,
     resourceType: "user",
     resourceId: newUser.id,
