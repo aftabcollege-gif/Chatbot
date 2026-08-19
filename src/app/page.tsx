@@ -1,45 +1,22 @@
-"use client";
+import { db } from "@/db";
+import { sql } from "drizzle-orm";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useAuth } from "@/lib/auth-context";
+export const dynamic = "force-dynamic";
 
-export default function HomePage() {
-  const router = useRouter();
-  const { isAuthenticated, isLoading } = useAuth();
-  const [setupDone, setSetupDone] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    async function checkSetup() {
-      try {
-        const res = await fetch("/api/setup/status");
-        const data = await res.json() as { completed: boolean };
-        setSetupDone(data.completed);
-      } catch {
-        setSetupDone(false);
-      }
-    }
-    void checkSetup();
-  }, []);
-
-  useEffect(() => {
-    if (isLoading || setupDone === null) return;
-
-    if (!setupDone) {
-      router.push("/setup");
-    } else if (isAuthenticated) {
-      router.push("/chat");
-    } else {
-      router.push("/login");
-    }
-  }, [isLoading, isAuthenticated, setupDone, router]);
+export default async function HomePage() {
+  await db.execute(sql`select 1`);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-900">
-      <div className="flex flex-col items-center gap-4">
-        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-slate-400 text-sm">در حال بارگذاری...</p>
-      </div>
-    </div>
+    <main className="grid min-h-screen place-items-center px-6 py-12">
+      <section className="w-full max-w-2xl rounded-3xl bg-white p-10 shadow-[0_24px_60px_rgba(16,24,40,0.12)]">
+        <p className="m-0 text-sm uppercase tracking-[0.08em] text-slate-600">Starter template</p>
+        <h1 className="mt-4 text-[clamp(2rem,5vw,3.25rem)] font-semibold leading-[1.05] text-slate-950">
+          Arena Next.js PostgreSQL Starter
+        </h1>
+        <p className="mt-4 text-base text-slate-700">
+          Server-rendered with Next.js after a successful PostgreSQL query through Drizzle.
+        </p>
+      </section>
+    </main>
   );
 }

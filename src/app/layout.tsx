@@ -1,23 +1,16 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import "./globals.css";
-import { AuthProvider } from "@/lib/auth-context";
 
 export const metadata: Metadata = {
-  title: "سامانه هوش سازمانی",
-  description: "سامانه آفلاین هوش مصنوعی سازمانی — دانش، تجربه، اسناد",
-  viewport: "width=device-width, initial-scale=1",
+  title: "Arena Next.js PostgreSQL Starter",
+  description: "Starter template with Next.js, Drizzle, and PostgreSQL.",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="fa" dir="rtl">
-      <body>
-        <AuthProvider>{children}</AuthProvider>
-      </body>
+    <html lang="en">
+      <body className="bg-slate-100 text-slate-900 antialiased">{children}</body>
     </html>
   );
 }
