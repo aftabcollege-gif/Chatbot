@@ -1,27 +1,61 @@
-# Free deployment plan
+# راهنمای اجرا و دیپلوی — حالت آفلاین (Offline-First)
 
-## Architecture
+این سامانه طوری طراحی شده که **بدون اینترنت** اجرا شود: مدل زبانی (LLM) و مدل
+Embedding هر دو محلی (llama.cpp / GGUF) هستند و یک **کیل-سوییچ شبکه** تضمین می‌کند
+هیچ درخواستی به اینترنت ارسال نشود (`AI_MODE=offline` پیش‌فرض).
 
-- Frontend/API: Vercel Free Tier
-- Database: Free PostgreSQL provider with pgvector support
-- AI: OpenAI-compatible endpoint or free provider
+## پیش‌نیازها
 
-## Required variables
+- Node.js 20.9+
+- PostgreSQL (با پسوند pgvector — migration خودکار آن را نصب می‌کند)
+- یک بار دسترسی به اینترنت برای دانلود مدل‌ها (فقط هنگام نصب)
 
-See `.env.example`.
+## نصب و راه‌اندازی
 
-## Current modules
+```bash
+# 1) نصب وابستگی‌ها
+npm install
 
-- Authentication API
-- Chat API
-- Document API
-- Knowledge API
-- Health check API
-- Drizzle PostgreSQL layer
+# 2) دانلود مدل‌های محلی (فقط یک بار، با اینترنت)
+node scripts/install-model.mjs        # LLM (Qwen2.5-1.5B) + Embedding (bge-m3) + OCR
+# یا جداگانه:
+node scripts/install-model.mjs --llm --embedding --ocr
 
-## Next implementation steps
+# 3) تنظیمات
+cp .env.example .env
+# سپس در .env مقدار DATABASE_URL و JWT_SECRET (حداقل ۳۲ کاراکتر) و JOB_SECRET را بگذارید.
 
-1. Complete document ingestion pipeline.
-2. Connect embeddings and vector search.
-3. Connect UI to APIs.
-4. Verify Vercel build.
+# 4) ساخت و اجرا
+npm run build
+npm start
+```
+
+- Migration های دیتابیس هنگام اولین اجرای سرور به‌صورت خودکار اعمال می‌شوند.
+- اولین بار صفحه راه‌اندازی (`/setup`) سازمان و کاربر مدیر را می‌سازد.
+
+## اجرا بدون اینترنت
+
+بعد از نصب مدل‌ها، کل سیستم آفلاین کار می‌کند:
+
+- `AI_MODE=offline` (پیش‌فرض): کیل-سوییچ شبکه هر درخواست به سرویس‌های هوش
+  مصنوعی خارجی (OpenAI و...) را قبل از اتصال مسدود می‌کند.
+- اگر مدل Embedding در دسترس نباشد، جستجو به حالت «کلمات کلیدی» (tsvector)
+  تنزل می‌کند؛ اگر مدل LLM در دسترس نباشد، پاسخ «استخراجی از منابع» داده می‌شود.
+- هیچ fallback خودکاری به کلاد وجود ندارد.
+
+## معماری
+
+- **فرانت/API:** Next.js 16
+- **دیتابیس:** PostgreSQL + pgvector (RAG داخل دیتابیس، مقیاس‌پذیر تا ۱۰۰هزار+ سند)
+- **LLM محلی:** Qwen2.5-1.5B-Instruct (GGUF Q4_K_M) با node-llama-cpp
+- **Embedding محلی:** BAAI/bge-m3 (GGUF Q8_0, 1024 بعد)
+- **OCR:** Tesseract.js (فارسی + انگلیسی، کاملاً محلی)
+
+## ماژول‌ها
+
+- احراز هویت (JWT + Session + RBAC)
+- چت هوشمند با RAG و استناددهی
+- مدیریت اسناد (آپلود → استخراج → OCR → chunk → index)
+- پایگاه دانش و تجربیات سازمانی با گردش‌کار تأیید
+- جستجوی ترکیبی (semantic + keyword)
+- پنل مدیریت، لاگ حسابرسی، تنظیمات سیستم، صف پردازش پس‌زمینه

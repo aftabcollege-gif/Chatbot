@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq, and, isNull, desc } from "drizzle-orm";
 import { db } from "@/db";
-import { experiences, experienceTags, documentChunks } from "@/db/schema";
+import { experiences, experienceTags } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
 import { getEmbedding } from "@/lib/ai/orchestrator";
-import { chunkText } from "@/lib/chunking";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";

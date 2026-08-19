@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
-import { deleteStoredFile } from "@/lib/storage";
+import { deleteStoredFile } from "@/lib/documents/storage";
 
 export async function GET(
   request: NextRequest,

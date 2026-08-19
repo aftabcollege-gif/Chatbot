@@ -4,8 +4,9 @@ import { db } from "@/db";
 import { documents } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
-import { storeFile, validateUpload, computeSHA256 } from "@/lib/storage";
-import { queueDocumentProcessing } from "@/lib/document-processor";
+import { saveBufferSecurely, sha256Buffer } from "@/lib/documents/storage";
+import { assertAllowedFile, assertSafeZipContainer, FileValidationError } from "@/lib/documents/validate";
+import { enqueueJob } from "@/lib/jobs/queue";
 import { logEvent } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
@@ -63,21 +64,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const filename = file.name;
   const mimeType = file.type;
 
-  // Validate file
-  const validation = validateUpload(buffer, filename, mimeType);
-  if (!validation.valid) {
-    return NextResponse.json({ error: validation.error }, { status: 400 });
+  // Validate file (extension, size, zip-bomb protection)
+  try {
+    assertAllowedFile(filename, mimeType, buffer.length);
+    assertSafeZipContainer(buffer, filename);
+  } catch (err) {
+    const message = err instanceof FileValidationError ? err.message : "فایل نامعتبر است.";
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 
   // Check for duplicate
-  const fileHash = computeSHA256(buffer);
+  const fileHash = sha256Buffer(buffer);
   const [existing] = await db
     .select()
     .from(documents)
     .where(
       and(
         eq(documents.organizationId, user.organizationId),
-        eq(documents.fileHash, fileHash),
+        eq(documents.sha256, fileHash),
         isNull(documents.deletedAt)
       )
     )
@@ -90,8 +94,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Store file
-  const stored = await storeFile(buffer, filename, user.organizationId);
+  // Store file (path is relative to STORAGE_DIR, used by the ingest pipeline)
+  const stored = await saveBufferSecurely(user.organizationId, "documents", buffer);
 
   // Create document record
   const [doc] = await db
@@ -99,21 +103,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .values({
       organizationId: user.organizationId,
       departmentId: user.departmentId,
-      ownerId: user.id,
+      uploadedBy: user.id,
       title: title ?? filename,
-      originalFilename: filename,
-      fileType: filename.split(".").pop()?.toLowerCase() ?? "unknown",
+      fileName: filename,
       mimeType,
-      fileSizeBytes: buffer.length,
-      fileHash,
-      storagePath: stored.path,
-      status: "UPLOADED",
-      visibility: "department",
+      fileSize: buffer.length,
+      sha256: fileHash,
+      storagePath: stored.storagePath,
+      status: "pending",
     })
     .returning();
 
-  // Queue for processing
-  await queueDocumentProcessing(doc.id, user.organizationId);
+  // Queue for processing (background job: extract → chunk → embed → index)
+  await enqueueJob(user.organizationId, "document_ingest", doc.id, { title: doc.title });
 
   // Audit
   await logEvent({
@@ -125,7 +127,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     resourceId: doc.id,
     resourceName: doc.title,
     outcome: "SUCCESS",
-    metadata: { filename, fileType: doc.fileType, sizeBytes: buffer.length },
+    metadata: { filename, mimeType, sizeBytes: buffer.length },
   });
 
   return NextResponse.json(doc, { status: 201 });

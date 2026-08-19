@@ -9,27 +9,49 @@ import type { ExtractedPage } from "@/lib/documents/extract";
 const execFileAsync = promisify(execFile);
 
 const TESSDATA_PATH = path.resolve(process.cwd(), "models/ocr/tessdata");
-const OCR_LANGS = "fas+eng"; // Persian + English, fully local trained data
 
 let workerPromise: Promise<Worker> | null = null;
+
+/**
+ * Detect which Tesseract language files are actually installed (either
+ * compressed `*.traineddata.gz` or plain `*.traineddata`) so OCR works with
+ * whatever subset was installed offline. Persian is preferred, English is the
+ * guaranteed fallback.
+ */
+async function resolveLangs(): Promise<{ langs: string[]; gzip: boolean }> {
+  const candidates = ["fas", "eng"];
+  const available: string[] = [];
+  let gzip = true;
+
+  for (const lang of candidates) {
+    const gzPath = path.join(TESSDATA_PATH, `${lang}.traineddata.gz`);
+    const plainPath = path.join(TESSDATA_PATH, `${lang}.traineddata`);
+    const gzOk = await fs.access(gzPath).then(() => true).catch(() => false);
+    const plainOk = await fs.access(plainPath).then(() => true).catch(() => false);
+    if (gzOk || plainOk) {
+      available.push(lang);
+      if (!gzOk) gzip = false; // at least one plain file → plain mode
+    }
+  }
+
+  if (available.length === 0) {
+    throw new Error(
+      `OCR language data not found at ${TESSDATA_PATH}. Run "node scripts/install-model.mjs --ocr" to install offline OCR data.`,
+    );
+  }
+
+  return { langs: available, gzip };
+}
 
 async function getWorker(): Promise<Worker> {
   if (!workerPromise) {
     workerPromise = (async () => {
-      const exists = await fs
-        .access(path.join(TESSDATA_PATH, "eng.traineddata.gz"))
-        .then(() => true)
-        .catch(() => false);
-      if (!exists) {
-        throw new Error(
-          `OCR language data not found at ${TESSDATA_PATH}. Run scripts/install-model.mjs to install offline OCR data.`,
-        );
-      }
+      const { langs, gzip } = await resolveLangs();
       const { createWorker } = await import("tesseract.js");
-      const worker = await createWorker(["fas", "eng"], undefined, {
+      const worker = await createWorker(langs, undefined, {
         langPath: TESSDATA_PATH,
         cachePath: TESSDATA_PATH,
-        gzip: true,
+        gzip,
       });
       return worker;
     })();

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { processNextJob } from "@/lib/document-processor";
+import { processPendingJobOnce } from "@/lib/jobs/worker";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +20,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const processed = await processNextJob();
+    const processed = await processPendingJobOnce();
     return NextResponse.json({ processed });
   } catch (error) {
     console.error("[JobRunner] Error:", error);

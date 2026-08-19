@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Environment files (secrets)
+.env
+.env.local
+.env.production
+
+# Local storage (uploaded files, temp data)
+storage/
+
+# Large AI model files — install them with `node scripts/install-model.mjs`
+models/llm/*.gguf
+models/embeddings/*.gguf
+models/ocr/tessdata/*.traineddata.gz
+models/ocr/tessdata/.tmp-*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# TypeScript build info
+*.tsbuildinfo

@@ -67,7 +67,24 @@ async function vectorSearch(organizationId: string, embedding: number[], limit: 
   return (result as unknown as { rows: VectorRow[] }).rows;
 }
 
+/**
+ * Build an OR-combined tsquery from the raw query so natural-language
+ * questions ("مدت مرخصی استعلاجی چقدر است؟") still match chunks that share
+ * only some terms. ts_rank then ranks by relevance.
+ */
+function buildOrQuery(rawQuery: string): string | null {
+  const terms = normalizeQuery(rawQuery)
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 1);
+  if (terms.length === 0) return null;
+  // Keep at most 12 terms to avoid pathological queries.
+  return terms.slice(0, 12).join(" | ");
+}
+
 async function keywordSearch(organizationId: string, query: string, limit: number): Promise<VectorRow[]> {
+  const orQuery = buildOrQuery(query);
+  if (!orQuery) return [];
   const result = await db.execute<VectorRow>(sql`
     SELECT kc.id,
            kc.source_type,
@@ -77,10 +94,10 @@ async function keywordSearch(organizationId: string, query: string, limit: numbe
            kc.page,
            kc.content,
            kc.chunk_index,
-           ts_rank(kc.content_tsv, websearch_to_tsquery('simple', ${query})) AS score
+           ts_rank(kc.content_tsv, to_tsquery('simple', ${orQuery})) AS score
     FROM knowledge_chunks kc
     WHERE kc.organization_id = ${organizationId}
-      AND kc.content_tsv @@ websearch_to_tsquery('simple', ${query})
+      AND kc.content_tsv @@ to_tsquery('simple', ${orQuery})
       AND (
         (kc.source_type = 'document' AND EXISTS (
           SELECT 1 FROM documents d WHERE d.id = kc.source_id AND d.is_deleted = false AND d.status = 'completed'
@@ -105,11 +122,22 @@ export async function hybridSearch(organizationId: string, rawQuery: string): Pr
   const query = normalizeQuery(rawQuery);
   const candidatePoolSize = Math.max(30, config.rag.topK * 4);
 
-  const embeddingProvider = getEmbeddingProvider();
-  const [queryEmbedding] = await embeddingProvider.embed([query], "query");
+  // Semantic vector search is only possible when a local embedding model is
+  // installed. If it is missing, degrade gracefully to keyword-only search —
+  // the system stays fully usable offline (lexical retrieval), never crashes.
+  let queryEmbedding: number[] | null = null;
+  try {
+    const embeddingProvider = getEmbeddingProvider();
+    const [embedding] = await embeddingProvider.embed([query], "query");
+    queryEmbedding = embedding.vector;
+  } catch (error) {
+    console.error("[RAG] Local embedding model unavailable — keyword-only search:", error);
+  }
 
   const [vectorRows, keywordRows] = await Promise.all([
-    vectorSearch(organizationId, queryEmbedding.vector, candidatePoolSize),
+    queryEmbedding
+      ? vectorSearch(organizationId, queryEmbedding, candidatePoolSize)
+      : Promise.resolve([] as VectorRow[]),
     keywordSearch(organizationId, query, candidatePoolSize),
   ]);
 

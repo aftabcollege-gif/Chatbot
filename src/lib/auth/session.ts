@@ -112,7 +112,7 @@ export async function getCurrentSession(): Promise<CurrentSession | null> {
       role: userRow.role,
     },
     sessionId: sessionRow.id,
-    csrfSecret: sessionRow.csrfSecret,
+    csrfSecret: sessionRow.csrfSecret ?? "",
   };
 }
 

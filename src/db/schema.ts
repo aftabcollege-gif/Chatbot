@@ -31,7 +31,10 @@ export const EMBEDDING_DIMENSIONS = 1024; // bge-m3 output dimensionality
 export const organizations = pgTable("organizations", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 200 }).notNull(),
-  slug: varchar("slug", { length: 120 }).notNull().unique(),
+  slug: varchar("slug", { length: 120 }).unique(),
+  description: text("description"),
+  settings: jsonb("settings").$type<Record<string, unknown>>().default({}),
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -44,14 +47,72 @@ export const departments = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 200 }).notNull(),
+    isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("departments_org_idx").on(t.organizationId)],
 );
 
 // ---------------------------------------------------------------------------
-// Users, Roles & Sessions
+// Roles, Permissions, Users & Sessions (RBAC)
 // ---------------------------------------------------------------------------
+
+export const permissions = pgTable(
+  "permissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: varchar("code", { length: 100 }).notNull(),
+    description: text("description").notNull(),
+    category: varchar("category", { length: 50 }),
+    organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("permissions_code_idx").on(t.code)],
+);
+
+export const roles = pgTable(
+  "roles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 100 }).notNull(),
+    description: text("description"),
+    isSystem: boolean("is_system").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("roles_org_idx").on(t.organizationId)],
+);
+
+export const userRoles = pgTable(
+  "user_roles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("user_roles_user_role_idx").on(t.userId, t.roleId)],
+);
+
+export const rolePermissions = pgTable(
+  "role_permissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    permissionId: uuid("permission_id")
+      .notNull()
+      .references(() => permissions.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("role_permissions_role_perm_idx").on(t.roleId, t.permissionId)],
+);
 
 export const userRoleEnum = ["admin", "manager", "member"] as const;
 export type UserRole = (typeof userRoleEnum)[number];
@@ -66,15 +127,21 @@ export const users = pgTable(
     departmentId: uuid("department_id").references(() => departments.id, { onDelete: "set null" }),
     name: varchar("name", { length: 200 }).notNull(),
     email: varchar("email", { length: 255 }).notNull(),
+    username: varchar("username", { length: 100 }).notNull(),
     passwordHash: text("password_hash").notNull(),
     role: varchar("role", { length: 20 }).notNull().default("member"),
+    isSuperadmin: boolean("is_superadmin").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
-    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    failedLoginAttempts: integer("failed_login_attempts").notNull().default(0),
+    lastLogin: timestamp("last_login", { withTimezone: true }),
+    preferences: jsonb("preferences").$type<Record<string, unknown>>().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("users_org_email_idx").on(t.organizationId, t.email),
+    uniqueIndex("users_username_idx").on(t.username),
     index("users_org_idx").on(t.organizationId),
   ],
 );
@@ -86,13 +153,12 @@ export const sessions = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    organizationId: uuid("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
     tokenHash: text("token_hash").notNull(),
-    csrfSecret: text("csrf_secret").notNull(),
+    csrfSecret: text("csrf_secret"),
     userAgent: text("user_agent"),
     ipAddress: varchar("ip_address", { length: 64 }),
+    isRevoked: boolean("is_revoked").notNull().default(false),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -185,18 +251,35 @@ export const experiences = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     departmentId: uuid("department_id").references(() => departments.id, { onDelete: "set null" }),
     authorId: uuid("author_id").references(() => users.id, { onDelete: "set null" }),
+    ownerId: uuid("owner_id").references(() => users.id, { onDelete: "set null" }),
     title: varchar("title", { length: 500 }).notNull(),
-    problem: text("problem").notNull(),
-    action: text("action").notNull(),
-    result: text("result").notNull(),
-    lessonLearned: text("lesson_learned").notNull(),
+    subject: varchar("subject", { length: 255 }),
+    problemDescription: text("problem_description").notNull(),
+    rootCause: text("root_cause"),
+    actionsTaken: text("actions_taken").notNull(),
+    results: text("results"),
+    lessonsLearned: text("lessons_learned").notNull(),
+    suggestion: text("suggestion"),
+    relatedEquipment: varchar("related_equipment", { length: 500 }),
+    relatedProcess: varchar("related_process", { length: 500 }),
+    importance: varchar("importance", { length: 20 }).notNull().default("MEDIUM"),
+    visibility: varchar("visibility", { length: 20 }).notNull().default("department"),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    embedding: jsonb("embedding").$type<number[]>(),
     version: integer("version").notNull().default(1),
     status: varchar("status", { length: 20 }).notNull().default("draft"),
+    submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    reviewedBy: uuid("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
     publishedAt: timestamp("published_at", { withTimezone: true }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    reviewNotes: text("review_notes"),
     isDeleted: boolean("is_deleted").notNull().default(false),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -226,9 +309,70 @@ export const experienceAttachments = pgTable(
   (t) => [index("experience_attachments_exp_idx").on(t.experienceId)],
 );
 
+export const experienceTags = pgTable(
+  "experience_tags",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    experienceId: uuid("experience_id")
+      .notNull()
+      .references(() => experiences.id, { onDelete: "cascade" }),
+    tag: varchar("tag", { length: 100 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("experience_tags_exp_idx").on(t.experienceId)],
+);
+
+// ---------------------------------------------------------------------------
+// Knowledge items (curated organizational knowledge with review workflow)
+// ---------------------------------------------------------------------------
+
+export const knowledgeItems = pgTable(
+  "knowledge_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    departmentId: uuid("department_id").references(() => departments.id, { onDelete: "set null" }),
+    ownerId: uuid("owner_id").references(() => users.id, { onDelete: "set null" }),
+    title: varchar("title", { length: 500 }).notNull(),
+    subject: varchar("subject", { length: 255 }),
+    content: text("content").notNull(),
+    summary: text("summary"),
+    visibility: varchar("visibility", { length: 20 }).notNull().default("department"),
+    embedding: jsonb("embedding").$type<number[]>(),
+    status: varchar("status", { length: 20 }).notNull().default("DRAFT"),
+    reviewedBy: uuid("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    publishedBy: uuid("published_by").references(() => users.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    isDeleted: boolean("is_deleted").notNull().default(false),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("knowledge_items_org_idx").on(t.organizationId)],
+);
+
+export const knowledgeTags = pgTable(
+  "knowledge_tags",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    knowledgeId: uuid("knowledge_id")
+      .notNull()
+      .references(() => knowledgeItems.id, { onDelete: "cascade" }),
+    tag: varchar("tag", { length: 100 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("knowledge_tags_knowledge_idx").on(t.knowledgeId)],
+);
+
 // ---------------------------------------------------------------------------
 // Knowledge chunks: unified vector + keyword index for RAG
-// (covers both documents and experiences)
+// (covers documents and experiences)
 // ---------------------------------------------------------------------------
 
 export const knowledgeChunks = pgTable(
@@ -318,7 +462,10 @@ export const conversations = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     title: varchar("title", { length: 300 }).notNull().default("گفتگوی جدید"),
     summary: text("summary"),
+    messageCount: integer("message_count").notNull().default(0),
+    isPinned: boolean("is_pinned").notNull().default(false),
     isDeleted: boolean("is_deleted").notNull().default(false),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -332,11 +479,12 @@ export const messages = pgTable(
     conversationId: uuid("conversation_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
-    organizationId: uuid("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
     role: varchar("role", { length: 20 }).notNull(), // 'user' | 'assistant' | 'system'
     content: text("content").notNull(),
+    confidenceScore: real("confidence_score"),
+    responseTimeMs: integer("response_time_ms"),
+    ragTrace: jsonb("rag_trace").$type<unknown>(),
     citations: jsonb("citations").$type<CitationRecord[]>().default([]),
     retrievalScore: real("retrieval_score"),
     tokensUsed: integer("tokens_used"),
@@ -345,6 +493,27 @@ export const messages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("messages_conversation_idx").on(t.conversationId)],
+);
+
+export const messageSources = pgTable(
+  "message_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    sourceType: varchar("source_type", { length: 20 }).notNull(),
+    sourceId: uuid("source_id").notNull(),
+    chunkId: uuid("chunk_id"),
+    pageNumber: integer("page_number"),
+    section: varchar("section", { length: 300 }),
+    heading: varchar("heading", { length: 300 }),
+    relevanceScore: real("relevance_score"),
+    citationIndex: integer("citation_index").notNull(),
+    excerpt: text("excerpt"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("message_sources_message_idx").on(t.messageId)],
 );
 
 export type CitationRecord = {
@@ -367,17 +536,25 @@ export const auditLogs = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     organizationId: uuid("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
     userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
-    action: varchar("action", { length: 100 }).notNull(),
+    actorId: uuid("actor_id"),
+    actorName: varchar("actor_name", { length: 200 }),
+    actorRole: varchar("actor_role", { length: 100 }),
+    eventCode: varchar("event_code", { length: 100 }),
+    action: varchar("action", { length: 100 }),
     resourceType: varchar("resource_type", { length: 50 }),
     resourceId: uuid("resource_id"),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
+    resourceName: varchar("resource_name", { length: 500 }),
     ipAddress: varchar("ip_address", { length: 64 }),
+    userAgent: text("user_agent"),
     requestId: varchar("request_id", { length: 64 }),
+    outcome: varchar("outcome", { length: 20 }).notNull().default("SUCCESS"),
+    severity: varchar("severity", { length: 20 }).notNull().default("INFO"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("audit_logs_org_idx").on(t.organizationId),
-    index("audit_logs_action_idx").on(t.action),
+    index("audit_logs_action_idx").on(t.eventCode, t.action),
   ],
 );
 
@@ -400,15 +577,51 @@ export const modelRegistry = pgTable("model_registry", {
   installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-// Rate limiting store (per-user / per-ip sliding window, DB backed so it
-// survives process restarts and works across multiple server instances).
-export const rateLimitBuckets = pgTable(
-  "rate_limit_buckets",
+// ---------------------------------------------------------------------------
+// System settings (DB-backed runtime configuration)
+// ---------------------------------------------------------------------------
+
+export const systemSettings = pgTable(
+  "system_settings",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    bucketKey: varchar("bucket_key", { length: 200 }).notNull(),
-    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
-    count: integer("count").notNull().default(0),
+    key: varchar("key", { length: 100 }).notNull(),
+    value: jsonb("value").$type<unknown>().notNull(),
+    description: text("description"),
+    category: varchar("category", { length: 50 }),
+    updatedBy: uuid("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("rate_limit_bucket_key_idx").on(t.bucketKey, t.windowStart)],
+  (t) => [uniqueIndex("system_settings_key_idx").on(t.key)],
+);
+
+// ---------------------------------------------------------------------------
+// Setup status (initial setup wizard state)
+// ---------------------------------------------------------------------------
+
+export const setupStatus = pgTable("setup_status", {
+  id: integer("id").primaryKey().default(1),
+  completed: boolean("completed").notNull().default(false),
+  currentStep: integer("current_step").notNull().default(1),
+  organizationName: varchar("organization_name", { length: 255 }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// Rate limiting store (per-key sliding window, DB backed)
+// ---------------------------------------------------------------------------
+
+export const rateLimitAttempts = pgTable(
+  "rate_limit_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    key: varchar("key", { length: 200 }).notNull(),
+    action: varchar("action", { length: 50 }).notNull(),
+    ipAddress: varchar("ip_address", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("rate_limit_attempts_key_action_idx").on(t.key, t.action)],
 );

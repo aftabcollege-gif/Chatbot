@@ -1,135 +1,145 @@
 /**
- * AI Orchestrator — Manages LLM and Embedding providers
+ * AI Orchestrator — high-level access to the local-first AI stack.
  *
  * OFFLINE-FIRST ARCHITECTURE:
- * 1. Try Ollama (local LLM/Embedding) — primary
- * 2. Fall back to local extractive methods — NEVER to any cloud provider
- *
- * DIRECTIVE §15 COMPLIANCE:
- * - No cloud provider is in the production registry
- * - If local model fails, system degrades gracefully with clear error messages
- * - NO SILENT FALLBACK TO CLOUD
+ * 1. LLM + embedding generation always go through AIProviderFactory, which
+ *    in offline/local mode routes to the in-process llama.cpp runtime
+ *    (node-llama-cpp) with local GGUF models — never to any cloud.
+ * 2. The network kill-switch (network-guard.ts) is installed by
+ *    provider-factory as soon as this module loads, so even a future bug
+ *    cannot leak an outbound AI request in offline mode.
+ * 3. If the local model is unavailable, LLM callers receive a
+ *    LOCAL_LLM_UNAVAILABLE error and degrade to extractive answers; embedding
+ *    callers fall back to the deterministic lexical hashing vectorizer so the
+ *    app keeps working fully offline with keyword-only retrieval.
  */
 
-import { OllamaLLMProvider, OllamaEmbeddingProvider } from "./ollama-provider";
+import { getLlmProvider, getEmbeddingProvider } from "@/lib/ai/provider-factory";
 import { localEmbedding } from "@/lib/local-embeddings";
-import type { ChatMessage, ChatOptions, LLMResponse, AIProviderStatus } from "./types";
+import type { ChatMessageInput, GenerateOptions } from "@/lib/ai/types";
 
-const ollamaLLM = new OllamaLLMProvider();
-const ollamaEmbedding = new OllamaEmbeddingProvider();
-
-// Cache availability checks for 30 seconds to avoid hammering Ollama
-let llmAvailableCache: { value: boolean; expiry: number } | null = null;
-let embedAvailableCache: { value: boolean; expiry: number } | null = null;
-const CACHE_TTL_MS = 30_000;
-
-async function isLLMAvailable(): Promise<boolean> {
-  const now = Date.now();
-  if (llmAvailableCache && now < llmAvailableCache.expiry) {
-    return llmAvailableCache.value;
-  }
-  const value = await ollamaLLM.isAvailable();
-  llmAvailableCache = { value, expiry: now + CACHE_TTL_MS };
-  return value;
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
 }
 
-async function isEmbeddingAvailable(): Promise<boolean> {
-  const now = Date.now();
-  if (embedAvailableCache && now < embedAvailableCache.expiry) {
-    return embedAvailableCache.value;
-  }
-  const value = await ollamaEmbedding.isAvailable();
-  embedAvailableCache = { value, expiry: now + CACHE_TTL_MS };
-  return value;
+export interface ChatOptions {
+  temperature?: number;
+  maxTokens?: number;
+  onToken?: (partial: string) => void;
 }
 
-/** Invalidate availability cache (call after model change) */
-export function invalidateAICache(): void {
-  llmAvailableCache = null;
-  embedAvailableCache = null;
+export interface LLMResponse {
+  content: string;
+  tokenCount: number;
+  latencyMs: number;
+  modelName: string;
+}
+
+export interface AIProviderStatus {
+  llm: {
+    available: boolean;
+    name: string;
+    isLocal: boolean;
+  };
+  embedding: {
+    available: boolean;
+    name: string;
+    isLocal: boolean;
+    dimensions: number;
+  };
 }
 
 /**
- * Generate a chat completion using local LLM.
- * If Ollama is not available, throws an error with a user-friendly message.
- * NEVER falls back to cloud.
+ * Generate a chat completion using the local LLM.
+ * If the local model is unavailable, throws (rag.ts catches this and falls
+ * back to a grounded extractive answer). NEVER falls back to cloud.
  */
 export async function llmChat(
   messages: ChatMessage[],
-  options?: ChatOptions
+  options?: ChatOptions,
 ): Promise<LLMResponse> {
-  const available = await isLLMAvailable();
-  if (!available) {
-    throw new Error(
-      "مدل هوش مصنوعی محلی در دسترس نیست. لطفاً Ollama را راه‌اندازی کنید."
-    );
-  }
-  return ollamaLLM.chat(messages, options);
+  const provider = getLlmProvider();
+  const genOptions: GenerateOptions = {
+    temperature: options?.temperature,
+    maxTokens: options?.maxTokens,
+    onToken: options?.onToken,
+  };
+  const result = await provider.generate(messages as ChatMessageInput[], genOptions);
+  return {
+    content: result.text,
+    tokenCount: result.completionTokens,
+    latencyMs: result.latencyMs,
+    modelName: `local/${provider.kind}`,
+  };
 }
 
 /**
- * Get embedding for text.
- * Priority: Ollama embedding → local hashing-trick fallback
- * The local fallback is lexical only (NOT semantic), but ensures the system
- * continues to work without Ollama.
- *
- * NOTE: When using local fallback, RAG quality is keyword-based only.
+ * Get an embedding vector for text.
+ * Priority: local embedding model (llama.cpp/bge-m3) → lexical hashing
+ * fallback. The fallback is keyword-based only, but guarantees the system
+ * keeps working without any model files installed.
  */
 export async function getEmbedding(text: string): Promise<number[]> {
-  const available = await isEmbeddingAvailable();
-  if (available) {
-    try {
-      return await ollamaEmbedding.embed(text);
-    } catch (error) {
-      console.error("[AI/Embedding] Ollama embedding failed, using local fallback:", error);
-    }
+  try {
+    const provider = getEmbeddingProvider();
+    const [result] = await provider.embed([text], "query");
+    return result.vector;
+  } catch (error) {
+    console.error("[AI/Embedding] Local embedding unavailable, using lexical fallback:", error);
+    return localEmbedding(text);
   }
-
-  // Local hashing-trick fallback (lexical only, NOT semantic)
-  return localEmbedding(text);
 }
 
-/**
- * Get batch embeddings for multiple texts.
- */
+/** Get batch embeddings for multiple texts (passage mode for indexing). */
 export async function getEmbeddings(texts: string[]): Promise<number[][]> {
   if (!texts.length) return [];
-
-  const available = await isEmbeddingAvailable();
-  if (available) {
-    try {
-      return await ollamaEmbedding.embedBatch(texts);
-    } catch (error) {
-      console.error("[AI/Embedding] Ollama batch embedding failed, using local fallback:", error);
-    }
+  try {
+    const provider = getEmbeddingProvider();
+    const results = await provider.embed(texts, "passage");
+    return results.map((r) => r.vector);
+  } catch (error) {
+    console.error("[AI/Embedding] Local batch embedding unavailable, using lexical fallback:", error);
+    return texts.map((t) => localEmbedding(t));
   }
-
-  return texts.map((t) => localEmbedding(t));
 }
 
-/** Check if real (Ollama) embedding is active */
+/** Check if a real (semantic) embedding provider is active. */
 export async function isRealEmbeddingMode(): Promise<boolean> {
-  return isEmbeddingAvailable();
+  try {
+    const provider = getEmbeddingProvider();
+    const health = await provider.health();
+    return health.available;
+  } catch {
+    return false;
+  }
 }
 
-/** Get full AI provider status for health dashboard */
+/** Get full AI provider status for the admin health/settings screen. */
 export async function getAIStatus(): Promise<AIProviderStatus> {
-  const [llmAvailable, embedAvailable] = await Promise.all([
-    isLLMAvailable(),
-    isEmbeddingAvailable(),
+  const [llmHealth, embeddingHealth] = await Promise.all([
+    getLlmProvider().health(),
+    getEmbeddingProvider().health(),
   ]);
 
   return {
     llm: {
-      available: llmAvailable,
-      name: ollamaLLM.name,
-      isLocal: ollamaLLM.isLocal,
+      available: llmHealth.available,
+      name: llmHealth.modelName ?? "llama.cpp (local GGUF)",
+      isLocal: true,
     },
     embedding: {
-      available: embedAvailable,
-      name: embedAvailable ? ollamaEmbedding.name : "Local Hashing Fallback",
+      available: embeddingHealth.available,
+      name: embeddingHealth.modelName ?? "Lexical hashing fallback",
       isLocal: true,
-      dimensions: ollamaEmbedding.dimensions,
+      dimensions: embeddingHealth.available
+        ? (embeddingHealth.modelName ? 1024 : 768)
+        : 768,
     },
   };
+}
+
+/** Invalidate availability caches (kept for API compatibility). */
+export function invalidateAICache(): void {
+  // No-op: the local runtime caches model/context per process and self-heals.
 }

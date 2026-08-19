@@ -73,3 +73,15 @@ export function startJobWorker(): void {
   }, POLL_INTERVAL_MS);
   console.log("[jobs] background job worker started (poll interval: %dms)", POLL_INTERVAL_MS);
 }
+
+/**
+ * Process exactly one pending job (if any) and return whether one was handled.
+ * Used by the internal scheduler endpoint (/api/jobs/process) and by the
+ * long-lived worker loop above.
+ */
+export async function processPendingJobOnce(): Promise<boolean> {
+  const job = await claimNextJob();
+  if (!job) return false;
+  await runJob(job);
+  return true;
+}

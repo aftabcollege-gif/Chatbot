@@ -1,18 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getEmbedding } from "@/lib/ai/orchestrator";
-import { hybridSearch } from "@/lib/vector-search";
+import { hybridSearch } from "@/lib/rag/search";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
 const SearchSchema = z.object({
   query: z.string().min(1).max(500),
-  limit: z.number().int().min(1).max(50).default(10),
-  sourceTypes: z
-    .array(z.enum(["document", "knowledge", "experience"]))
-    .optional(),
 });
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -37,18 +32,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "پارامترهای جستجو نامعتبر است" }, { status: 400 });
   }
 
-  const { query, limit, sourceTypes } = parsed.data;
+  const { query } = parsed.data;
 
   const startMs = Date.now();
-  const queryEmbedding = await getEmbedding(query);
+  const chunks = await hybridSearch(user.organizationId, query);
 
-  const results = await hybridSearch(queryEmbedding, query, {
-    organizationId: user.organizationId,
-    departmentId: user.departmentId,
-    userId: user.id,
-    limit,
-    sourceTypes,
-  });
+  const results = chunks.map((chunk) => ({
+    id: chunk.id,
+    sourceId: chunk.sourceId,
+    sourceType: chunk.sourceType,
+    title: chunk.sourceTitle,
+    content: chunk.content,
+    pageNumber: chunk.page,
+    section: chunk.section,
+    relevanceScore: chunk.fusedScore,
+    excerpt: chunk.content.slice(0, 300),
+  }));
 
   return NextResponse.json({
     query,

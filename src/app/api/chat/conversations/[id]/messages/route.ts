@@ -150,7 +150,7 @@ export async function POST(
     const sourceValues = ragResult.sources.map((source, index) => ({
       messageId: assistantMessage.id,
       sourceType: source.sourceType,
-      sourceId: source.documentId ?? source.knowledgeId ?? source.experienceId ?? source.id,
+      sourceId: source.documentId ?? source.experienceId ?? source.id,
       chunkId: source.sourceType === "document" ? source.id : null,
       pageNumber: source.pageNumber,
       section: source.section,

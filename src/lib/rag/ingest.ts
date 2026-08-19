@@ -1,6 +1,6 @@
 import { eq, and } from "drizzle-orm";
 import { db } from "@/db";
-import { knowledgeChunks } from "@/db/schema";
+import { knowledgeChunks, EMBEDDING_DIMENSIONS } from "@/db/schema";
 import { getEmbeddingProvider } from "@/lib/ai/provider-factory";
 import type { TextChunk } from "@/lib/documents/chunk";
 
@@ -31,10 +31,22 @@ export async function reindexChunks(
 
   for (let i = 0; i < chunks.length; i += EMBEDDING_BATCH_SIZE) {
     const batch = chunks.slice(i, i + EMBEDDING_BATCH_SIZE);
-    const embeddings = await embeddingProvider.embed(
-      batch.map((c) => c.content),
-      "passage",
-    );
+
+    let embeddings: { vector: number[]; dimensions: number }[];
+    try {
+      embeddings = await embeddingProvider.embed(
+        batch.map((c) => c.content),
+        "passage",
+      );
+    } catch (error) {
+      // No local embedding model installed — index the chunks with zero
+      // vectors so they remain retrievable via keyword (tsvector) search.
+      console.error("[RAG] Local embedding model unavailable — indexing without vectors:", error);
+      embeddings = batch.map(() => ({
+        vector: new Array(EMBEDDING_DIMENSIONS).fill(0),
+        dimensions: EMBEDDING_DIMENSIONS,
+      }));
+    }
 
     await db.insert(knowledgeChunks).values(
       batch.map((chunk, idx) => ({

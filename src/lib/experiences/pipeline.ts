@@ -8,10 +8,13 @@ import { updateJobStatus } from "@/lib/jobs/queue";
 function buildExperienceText(exp: typeof experiences.$inferSelect): string {
   return [
     `عنوان: ${exp.title}`,
-    `مسئله (Problem): ${exp.problem}`,
-    `اقدام (Action): ${exp.action}`,
-    `نتیجه (Result): ${exp.result}`,
-    `درس آموخته (Lesson Learned): ${exp.lessonLearned}`,
+    exp.subject ? `موضوع: ${exp.subject}` : "",
+    `مسئله (Problem): ${exp.problemDescription}`,
+    exp.rootCause ? `علت ریشه‌ای (Root Cause): ${exp.rootCause}` : "",
+    `اقدامات انجام‌شده (Actions Taken): ${exp.actionsTaken}`,
+    exp.results ? `نتایج (Results): ${exp.results}` : "",
+    `درس آموخته (Lesson Learned): ${exp.lessonsLearned}`,
+    exp.suggestion ? `پیشنهاد: ${exp.suggestion}` : "",
     exp.tags.length > 0 ? `برچسب‌ها: ${exp.tags.join("، ")}` : "",
   ]
     .filter(Boolean)
