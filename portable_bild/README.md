@@ -1,48 +1,47 @@
-# اصلاح نسخهٔ Portable (آفلاین)
+# بستهٔ قابل‌حمل آفلاین — Windows x64
 
-این پوشه باید **کنار** پوشه‌های `.next` و `node_modules` نسخهٔ قابل‌حمل قرار بگیرد. برای اجرای برنامه در ویندوز فقط فایل **`Start-Portable.bat`** را اجرا کنید؛ `next start` یا فایل bat قدیمی را مستقیماً اجرا نکنید.
+این پوشه، منبع ساخت نسخهٔ قابل‌حمل است. خروجی نهایی یک فایل ZIP با نام
+`Chatbot-Portable-Windows-x64.zip` در **GitHub Release** است. ZIP را کامل روی
+فلش یا هر رایانهٔ Windows 10/11 x64 منتقل و extract کنید؛ سپس فقط
+`portable_bild\Start-Portable.bat` را اجرا کنید.
 
-## خطای برطرف‌شده
+## بدون نیاز به نصب
 
-در بعضی خروجی‌های Next.js/Turbopack، وابستگی واقعی زیر:
+خروجی Release شامل همهٔ این موارد است:
 
-```text
-@electric-sql/pglite
-```
+- `runtime\node.exe` — Node.js قابل‌حمل؛ نصب Node.js لازم نیست.
+- `.next` و `node_modules` ساخته‌شده روی Windows x64 — نصب npm لازم نیست.
+- `models\llm\model.gguf` — مدل زبانی محلی Qwen؛ دانلود مدل لازم نیست.
+- OCR فارسی و انگلیسی — هیچ سرویس OCR خارجی استفاده نمی‌شود.
+- PGlite در `storage\database` — PostgreSQL محلی مبتنی بر WASM؛ نصب یا اجرای
+  PostgreSQL لازم نیست.
+- همهٔ داده‌ها، اسناد و پایگاه داده در همان پوشهٔ `storage` نگهداری می‌شوند.
 
-به نام داخلی و مخصوص همان build، مانند زیر، تبدیل می‌شود:
+در اولین اجرا، فایل `.env` با کلیدهای تصادفی محلی ایجاد می‌شود. `AI_MODE=offline`
+است و هیچ کلید API یا اتصال اینترنتی برای کارکرد برنامه وجود ندارد.
 
-```text
-@electric-sql/pglite-7966c14983af6418
-```
+> برای انتقال اطلاعات به رایانهٔ دیگر، در حالی که برنامه بسته است کل پوشهٔ
+> `Chatbot-Portable` را کپی کنید؛ پوشهٔ `storage` را حذف نکنید.
 
-این نام داخلی پکیج npm نیست. هنگام کپی کردن نسخهٔ portable، پوشهٔ alias آن معمولاً موجود نیست و Next.js پیش از بالا آمدن برنامه و هنگام اجرای `instrumentation` با `ERR_MODULE_NOT_FOUND` متوقف می‌شود.
+## ساخت و انتشار ZIP در GitHub
 
-`Start-Portable.bat` ابتدا `repair-pglite-external.cjs` را اجرا می‌کند. این اسکریپت:
+به تب **Actions** مخزن بروید، workflow با نام **Build portable Windows package**
+را انتخاب کنید و **Run workflow** را اجرا نمایید. یک tag مانند
+`portable-v1.0.0` وارد کنید. workflow به‌صورت خودکار روی Windows:
 
-1. نام aliasهای واقعی را از `.next/server/chunks` می‌خواند (به یک هش ثابت وابسته نیست)؛
-2. نسخهٔ موجود و آفلاین `node_modules/@electric-sql/pglite` را در مسیر alias مورد نیاز کپی می‌کند؛
-3. resolve شدن آن را با Node.js بررسی می‌کند؛
-4. **فقط پس از موفقیت** سرور Next.js را اجرا می‌کند.
+1. dependencyهای Windows را نصب می‌کند؛
+2. مدل زبانی و OCR را دریافت می‌کند؛
+3. برنامه را build می‌کند؛
+4. Node.js قابل‌حمل را اضافه می‌کند؛
+5. ZIP کامل را در GitHub Release همان tag بارگذاری می‌کند.
 
-بنابراین هیچ دانلود، `npm install`، symlink یا دسترسی Administrator لازم نیست. در اجرای بعدی نیز در صورت آماده بودن alias، تغییری انجام نمی‌شود.
+مدل‌ها و باینری‌ها عمداً در Git source قرار ندارند: محدودیت GitHub برای هر فایل
+Git حدود ۱۰۰MB است، درحالی‌که مدل زبانی صدها مگابایت حجم دارد. اما فایل Release
+خروجی کامل و قابل‌انتقال است و پس از دریافت، کاملاً آفلاین کار می‌کند.
 
-## ساختار لازم
+## رفع alias PGlite
 
-```text
-app/
-├─ .next/
-├─ node_modules/
-│  └─ @electric-sql/pglite/     ← باید داخل بستهٔ portable باشد
-├─ portable_bild/
-│  ├─ Start-Portable.bat
-│  ├─ start-portable.cjs
-│  └─ repair-pglite-external.cjs
-└─ package.json
-```
-
-> پوشهٔ اصلی `@electric-sql/pglite` را از نسخهٔ portable حذف نکنید. اگر اسکریپت اعلام کرد این پوشه وجود ندارد، نسخهٔ portable ناقص کپی شده است؛ کل `node_modules/@electric-sql/pglite` را از بستهٔ اصلی بازگردانید. نصب اینترنتی در زمان اجرای آفلاین راه‌حل نیست.
-
-## برای تولید build جدید
-
-در buildهای بعدی نیز همین launcher را حفظ کنید. فایل‌های `.next`، `node_modules` و `portable_bild` باید با هم و از یک خروجی منتشر شوند. این روش به‌صورت خودکار هش جدید Turbopack را تشخیص می‌دهد.
+`repair-pglite-external.cjs` پیش از شروع Next.js اجرا می‌شود. در بعضی buildهای
+Turbopack، PGlite با نام داخلی هش‌شده صادر می‌شود. اسکریپت نام را از `.next`
+می‌خواند و alias محلی لازم را بدون اینترنت می‌سازد تا خطای
+`ERR_MODULE_NOT_FOUND` رخ ندهد.

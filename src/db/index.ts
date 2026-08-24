@@ -1,24 +1,24 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import fs from "node:fs";
+import path from "node:path";
+import { drizzle } from "drizzle-orm/pglite";
+import { PGlite } from "@electric-sql/pglite";
 
-const databaseUrl = process.env.DATABASE_URL;
-
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL is required");
-}
+// The desktop/portable edition uses PGlite: PostgreSQL compiled to WebAssembly
+// and stored inside this directory.  It needs no installed database service,
+// network listener, username, password, or DATABASE_URL.
+const databaseDirectory = path.resolve(
+  process.cwd(),
+  process.env.PORTABLE_DATABASE_DIR ?? "./storage/database",
+);
 
 const globalForDb = globalThis as typeof globalThis & {
-  __arenaNextJsPostgresqlPool?: Pool;
+  __arenaPortableDatabase?: PGlite;
 };
 
-export const pool =
-  globalForDb.__arenaNextJsPostgresqlPool ??
-  new Pool({
-    connectionString: databaseUrl,
-  });
+// PGlite creates its own final directory but not a missing parent directory.
+fs.mkdirSync(path.dirname(databaseDirectory), { recursive: true });
+export const client = globalForDb.__arenaPortableDatabase ?? new PGlite(databaseDirectory);
+globalForDb.__arenaPortableDatabase = client;
 
-if (process.env.NODE_ENV !== "production") {
-  globalForDb.__arenaNextJsPostgresqlPool = pool;
-}
-
-export const db = drizzle(pool);
+export const db = drizzle(client);
+export const isPortableDatabase = true;
