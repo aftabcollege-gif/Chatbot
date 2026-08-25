@@ -8,17 +8,42 @@ on:
       - ".github/workflows/build-windows.yml"
   workflow_dispatch:
     inputs:
-      large_model:
-        description: "Bundle the 7B model instead of 1.5B (larger download)"
-        required: false
-        default: "false"
+      model:
+        description: "Which LLM model to bundle"
+        required: true
+        type: choice
+        default: "1.5b"
+        options:
+          - "1.5b"
+          - "7b"
+          - "both"
 
+# Build once per model; the matrix is driven by the dispatch input or push default.
 jobs:
+  matrix-prep:
+    runs-on: ubuntu-latest
+    outputs:
+      models: ${{ steps.set.outputs.models }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event.inputs.model }}" = "7b" ]; then
+            echo 'models=["7b"]' >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.inputs.model }}" = "both" ]; then
+            echo 'models=["1.5b","7b"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'models=["1.5b"]' >> "$GITHUB_OUTPUT"
+          fi
+
   # -----------------------------------------------------------------
   # Build a standalone backend-server.exe with PyInstaller on Windows.
   # -----------------------------------------------------------------
   backend:
+    needs: matrix-prep
     runs-on: windows-latest
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.matrix-prep.outputs.models) }}
     defaults:
       run:
         working-directory: enterprise-ai-assistant
@@ -46,7 +71,7 @@ jobs:
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:
-          name: backend-windows
+          name: backend-windows-${{ matrix.model }}
           path: enterprise-ai-assistant/backend/dist/backend-server
           retention-days: 14
 
@@ -75,24 +100,31 @@ jobs:
 
   # -----------------------------------------------------------------
   # Download native models + llama-server + sqlite-vec (Windows).
+  # matrix.model selects 1.5B vs 7B.
   # -----------------------------------------------------------------
   models:
+    needs: matrix-prep
     runs-on: windows-latest
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.matrix-prep.outputs.models) }}
     defaults:
       run:
         working-directory: enterprise-ai-assistant
     steps:
       - uses: actions/checkout@v4
+
       - name: Download models and native binaries
         env:
-          EAI_LARGE_MODEL: ${{ github.event.inputs.large_model || 'false' }}
+          EAI_LARGE_MODEL: ${{ matrix.model == '7b' && '1' || '0' }}
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
           powershell -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
+
       - uses: actions/upload-artifact@v4
         with:
-          name: models-and-binaries
+          name: models-and-binaries-${{ matrix.model }}
           path: |
             enterprise-ai-assistant/models
             enterprise-ai-assistant/llm
@@ -101,11 +133,14 @@ jobs:
           retention-days: 14
 
   # -----------------------------------------------------------------
-  # Package the Electron app into setup.exe via electron-builder/NSIS.
+  # Package the Electron app into both NSIS setup.exe and MSI.
   # -----------------------------------------------------------------
-  electron-installer:
+  installer:
     needs: [backend, frontend, models]
     runs-on: windows-latest
+    strategy:
+      matrix:
+        model: ${{ fromJson(needs.matrix-prep.outputs.models) }}
     defaults:
       run:
         working-directory: enterprise-ai-assistant/desktop-electron
@@ -115,7 +150,7 @@ jobs:
       - name: Download backend
         uses: actions/download-artifact@v4
         with:
-          name: backend-windows
+          name: backend-windows-${{ matrix.model }}
           path: enterprise-ai-assistant/backend/dist/backend-server
 
       - name: Download frontend
@@ -127,7 +162,7 @@ jobs:
       - name: Download models & binaries
         uses: actions/download-artifact@v4
         with:
-          name: models-and-binaries
+          name: models-and-binaries-${{ matrix.model }}
           path: enterprise-ai-assistant
 
       - uses: actions/setup-node@v4
@@ -139,36 +174,42 @@ jobs:
       - name: Install Electron dependencies
         run: npm install
 
-      - name: Build NSIS installer
+      - name: Build NSIS + MSI installers
         run: npm run dist
 
-      - name: Rename installer to setup.exe
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem ..\dist-electron\*.exe | Select-Object -First 1
-          New-Item -ItemType Directory -Force -Path ..\release
-          Copy-Item $exe.FullName ..\release\setup.exe -Force
-
-      - name: Create final ZIP
+      - name: Collect installers (setup.exe and .msi)
         shell: pwsh
         working-directory: enterprise-ai-assistant
         run: |
-          New-Item -ItemType Directory -Force -Path stage\prerequisites
-          Copy-Item release\setup.exe stage\setup.exe -Force
-          if (Test-Path prerequisites\vc_redist.x64.exe) { Copy-Item prerequisites\vc_redist.x64.exe stage\prerequisites\ -Force }
-          if (Test-Path prerequisites\MicrosoftEdgeWebView2Setup.exe) { Copy-Item prerequisites\MicrosoftEdgeWebView2Setup.exe stage\prerequisites\ -Force }
-          Copy-Item README.txt stage\; Copy-Item LICENSE.txt stage\
-          Compress-Archive -Path stage\* -DestinationPath release\Enterprise-AI-Assistant-Setup.zip -Force
+          New-Item -ItemType Directory -Force -Path release-${{ matrix.model }} | Out-Null
+          Get-ChildItem dist-electron\*.exe, dist-electron\*.msi | ForEach-Object {
+            if ($_.Name -match 'Setup.*\.exe$') {
+              Copy-Item $_.FullName "release-${{ matrix.model }}\setup.exe" -Force
+            } else {
+              Copy-Item $_.FullName "release-${{ matrix.model }}\" -Force
+            }
+          }
+          New-Item -ItemType Directory -Force -Path stage-${{ matrix.model }}\prerequisites | Out-Null
+          Copy-Item "release-${{ matrix.model }}\setup.exe" "stage-${{ matrix.model }}\" -Force
+          Get-ChildItem "release-${{ matrix.model }}\*.msi" | ForEach-Object { Copy-Item $_.FullName "stage-${{ matrix.model }}\" -Force }
+          if (Test-Path prerequisites\vc_redist.x64.exe) {
+            Copy-Item prerequisites\vc_redist.x64.exe "stage-${{ matrix.model }}\prerequisites\" -Force
+          }
+          if (Test-Path prerequisites\MicrosoftEdgeWebView2Setup.exe) {
+            Copy-Item prerequisites\MicrosoftEdgeWebView2Setup.exe "stage-${{ matrix.model }}\prerequisites\" -Force
+          }
+          Copy-Item README.txt, LICENSE.txt "stage-${{ matrix.model }}\"
+          Compress-Archive -Path "stage-${{ matrix.model }}\*" -DestinationPath "release-${{ matrix.model }}\Enterprise-AI-Assistant-Setup-${{ matrix.model }}.zip" -Force
 
-      - name: Upload setup.exe + ZIP
+      - name: Upload ${{ matrix.model }} installers
         uses: actions/upload-artifact@v4
         with:
-          name: EnterpriseAI-Setup
-          path: enterprise-ai-assistant/release
+          name: EnterpriseAI-Setup-${{ matrix.model }}
+          path: enterprise-ai-assistant/release-${{ matrix.model }}
           retention-days: 30
 
       - name: Publish GitHub Release (on main tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: enterprise-ai-assistant/release/*
+          files: enterprise-ai-assistant/release-${{ matrix.model }}/*

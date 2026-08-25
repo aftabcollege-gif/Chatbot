@@ -65,9 +65,20 @@
         {
           "target": "nsis",
           "arch": ["x64"]
+        },
+        {
+          "target": "msi",
+          "arch": ["x64"]
         }
       ],
       "icon": "build/icon.ico"
+    },
+    "msi": {
+      "oneClick": false,
+      "perMachine": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "دستیار هوشمند سازمانی"
     },
     "nsis": {
       "oneClick": false,

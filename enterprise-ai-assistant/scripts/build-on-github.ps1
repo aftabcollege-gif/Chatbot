@@ -1,35 +1,38 @@
 # ============================================================
-#  Build the Windows setup.exe in GitHub Actions (no local
-#  Windows / Rust / Python needed) and download the result.
+#  Build the Windows installer(s) in GitHub Actions and download
+#  the result — no local Windows, Rust, Python, or model download
+#  required.
+#
+#  Produces per model:
+#    setup.exe        (NSIS one-click/per-machine installer)
+#    EnterpriseAI.msi (MSI package for enterprise deployment)
+#    Enterprise-AI-Assistant-Setup-<model>.zip (bundle with
+#      prerequisites and README/LICENSE)
 #
 #  Usage:
-#    # one-time (only if gh isn't authenticated):
-#    gh auth login
-#
-#    powershell -ExecutionPolicy Bypass -File scripts\build-on-github.ps1
-#
-#  Optional: -LargeModel to bundle Qwen2.5-7B (~5GB) instead of 1.5B.
+#    gh auth login                                 # one-time
+#    powershell -File scripts\build-on-github.ps1               # 1.5B (default)
+#    powershell -File scripts\build-on-github.ps1 -Model 7b     # 7B model
+#    powershell -File scripts\build-on-github.ps1 -Model both   # both models
+#    powershell -File scripts\build-on-github.ps1 -Tauri         # Tauri/Inno build
 # ============================================================
 param(
-  [string]$Repo = "",            # e.g. "owner/repo"; defaults to the git remote
+  [string]$Repo = "",
   [string]$Ref = "main",
-  [switch]$LargeModel,
-  [switch]$Tauri                 # build Tauri/Inno instead of Electron/NSIS
+  [ValidateSet("1.5b","7b","both")]
+  [string]$Model = "1.5b",
+  [switch]$Tauri
 )
 
 $ErrorActionPreference = "Stop"
 
 if (-not $Repo) {
   $remote = git remote get-url origin 2>$null
-  if ($remote -match "github\.com[:/](.+?)(?:\.git)?$") {
-    $Repo = $Matches[1]
-  } else {
-    Write-Error "Could not detect repo. Pass -Repo owner/name."
-  }
+  if ($remote -match "github\.com[:/](.+?)(?:\.git)?$") { $Repo = $Matches[1] }
+  else { Write-Error "Could not detect repo. Pass -Repo owner/name." }
 }
-Write-Host "Repository: $Repo  ref: $Ref" -ForegroundColor Cyan
+Write-Host "Repo: $Repo  ref: $Ref  model: $Model" -ForegroundColor Cyan
 
-# GitHub Actions only recognises workflows at <repo>/.github/workflows.
 $wfDir = ".github/workflows"
 if (-not (Test-Path $wfDir)) {
   Write-Host "==> Copying workflows to .github/workflows at repo root..." -ForegroundColor Cyan
@@ -41,28 +44,25 @@ if (-not (Test-Path $wfDir)) {
 }
 
 $workflow = if ($Tauri) { "tauri.yml" } else { "build-windows.yml" }
-$inputs = if ($LargeModel) { @{ large_model = "true" } } else { @{} }
+$inputs = @{ model = $Model }
 
-Write-Host "==> Triggering $workflow ..." -ForegroundColor Cyan
-gh workflow run $workflow --repo $Repo --ref $Ref `
-  $(if ($LargeModel) { @('-f', 'large_model=true') } else { @() })
+Write-Host "==> Triggering $workflow (model=$Model)..." -ForegroundColor Cyan
+gh workflow run $workflow --repo $Repo --ref $Ref -f "model=$Model"
 
 Write-Host "Waiting for run to start..." -ForegroundColor Cyan
-Start-Sleep -Seconds 6
-$run = gh run list --repo $Repo --workflow $workflow --limit 1 --json databaseId,status | ConvertFrom-Json
+Start-Sleep -Seconds 7
+$run = gh run list --repo $Repo --workflow $workflow --limit 1 --json databaseId,displayTitle | ConvertFrom-Json
 $runId = $run[0].databaseId
-Write-Host "Run #$runId — streaming logs:" -ForegroundColor Cyan
+Write-Host "Run #$runId — $($run[0].displayTitle)" -ForegroundColor Cyan
 gh run watch $runId --repo $Repo --exit-status
 
-Write-Host "==> Downloading setup artifacts..." -ForegroundColor Green
+Write-Host "==> Downloading artifacts..." -ForegroundColor Green
 $out = "release"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 gh run download $runId --repo $Repo --dir $out
 
-$zip = Get-ChildItem -Path $out -Recurse -Filter "Enterprise-AI-Assistant-Setup.zip" | Select-Object -First 1
-if ($zip) {
-  Write-Host "`nDone: $($zip.FullName)" -ForegroundColor Green
-  explorer /select,$zip.FullName
-} else {
-  Write-Host "Artifacts downloaded to: $(Resolve-Path $out)" -ForegroundColor Green
+Write-Host "`nArtifacts (NSIS .exe + MSI + ZIP) downloaded to:" -ForegroundColor Green
+Write-Host (Resolve-Path $out)
+Get-ChildItem -Path $out -Recurse -Include *.exe,*.msi,*.zip | ForEach-Object {
+  Write-Host "  $($_.FullName)" -ForegroundColor Green
 }

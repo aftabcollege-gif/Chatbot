@@ -62,9 +62,12 @@ powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
 powershell -ExecutionPolicy Bypass -File scripts\build-electron.ps1
 ```
 
-Both produce `dist/Enterprise-AI-Assistant-Setup.zip` (or `...-Electron.zip`)
-containing `setup.exe`, `prerequisites/`, `README.txt` and `LICENSE.txt`.
-Installing requires **no** Python, Node, Docker or internet on the target.
+Both produce `dist/Enterprise-AI-Assistant-Setup.zip` containing `setup.exe`
+(NSIS), **`EnterpriseAI.msi`** (for enterprise/GPO deployment), `prerequisites/`,
+`README.txt` and `LICENSE.txt`. The GitHub Actions workflow runs a **model
+matrix** (`1.5b` default; `7b` or `both` via `-Model`) so you get installers for
+every model in one run. Installing requires **no** Python, Node, Docker or
+internet on the target.
 
 ### Option C — Build setup.exe in the cloud (no local Windows toolchain)
 
@@ -74,14 +77,19 @@ Windows runners and download the real `setup.exe`:
 ```powershell
 # from the repo root
 gh auth login   # one-time
+# 1.5B model (default, ~1GB, works on 8GB RAM):
 powershell -ExecutionPolicy Bypass -File enterprise-ai-assistant\scripts\build-on-github.ps1
+# 7B model (~5GB, recommended on 16GB+):
+powershell -ExecutionPolicy Bypass -File enterprise-ai-assistant\scripts\build-on-github.ps1 -Model 7b
+# build BOTH model variants in one run:
+powershell -ExecutionPolicy Bypass -File enterprise-ai-assistant\scripts\build-on-github.ps1 -Model both
 ```
 
 This copies the workflows from `enterprise-ai-assistant/.github/workflows/` to
-the repo-root `.github/workflows/`, pushes, triggers the Windows build, and
-downloads `Enterprise-AI-Assistant-Setup.zip` (containing `setup.exe` and
-prerequisites) into `release/`. Pass `-Tauri` for the Tauri/Inno build or
-`-LargeModel` to bundle the 7B model instead of 1.5B.
+the repo-root `.github/workflows/`, pushes, triggers the Windows matrix build,
+and downloads per-model folders containing `setup.exe` (NSIS), `EnterpriseAI.msi`,
+and `Enterprise-AI-Assistant-Setup-<model>.zip` into `release/`. Pass `-Tauri`
+for the Tauri/Inno build instead of Electron/NSIS.
 
 You can also run the workflow manually from the **Actions** tab
 ("Build Windows Installer" → *Run workflow*).
