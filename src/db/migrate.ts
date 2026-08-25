@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { client } from "@/db";
@@ -40,6 +41,31 @@ export function ensureDatabaseMigrated(): Promise<void> {
       const filename = path.join(process.cwd(), "drizzle", "0000_steady_stryfe.sql");
       const source = await fs.readFile(filename, "utf8");
       await client.exec(portableMigrationSql(source));
+
+      // A usable local database is included from the first launch. The
+      // bootstrap account is intentionally marked in preferences so the UI
+      // can require a password change before ordinary use.
+      const orgId = crypto.randomUUID();
+      const departmentId = crypto.randomUUID();
+      const adminId = crypto.randomUUID();
+      const initialPasswordHash = "$2b$12$we2lb1xZyKhwdKWvFMMS9u7xUzgN5y6/ER7xSF71lDkVqD2sD.BsS"; // ChangeMe123!
+      await client.query(
+        "INSERT INTO organizations (id, name, slug, is_active) VALUES ($1, $2, $3, true)",
+        [orgId, "سازمان پیش‌فرض", "default-organization"],
+      );
+      await client.query(
+        "INSERT INTO departments (id, organization_id, name, is_active) VALUES ($1, $2, $3, true)",
+        [departmentId, orgId, "واحد مرکزی"],
+      );
+      await client.query(
+        `INSERT INTO users (id, organization_id, department_id, name, email, username, password_hash, role, is_superadmin, is_active, preferences)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'admin', true, true, $8::jsonb)`,
+        [adminId, orgId, departmentId, "مدیر سامانه", "admin@localhost", "admin", initialPasswordHash, JSON.stringify({ mustChangePassword: true })],
+      );
+      await client.query(
+        "UPDATE setup_status SET completed = true, current_step = 5, organization_name = $1, completed_at = now() WHERE id = 1",
+        ["سازمان پیش‌فرض"],
+      );
       await client.query("INSERT INTO __portable_migrations (id) VALUES ($1)", [migrationId]);
       console.log("[db] portable PGlite schema applied successfully");
     })().catch((error) => {
