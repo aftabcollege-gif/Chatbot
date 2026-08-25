@@ -1,0 +1,174 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [main, master, "arena/**"]
+    paths:
+      - "enterprise-ai-assistant/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+    inputs:
+      large_model:
+        description: "Bundle the 7B model instead of 1.5B (larger download)"
+        required: false
+        default: "false"
+
+jobs:
+  # -----------------------------------------------------------------
+  # Build a standalone backend-server.exe with PyInstaller on Windows.
+  # -----------------------------------------------------------------
+  backend:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: enterprise-ai-assistant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: pip
+          cache-dependency-path: enterprise-ai-assistant/backend/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pyinstaller
+
+      - name: Build backend-server.exe (PyInstaller onedir)
+        run: |
+          cd backend
+          pyinstaller --noconfirm --clean backend-server.spec
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-windows
+          path: enterprise-ai-assistant/backend/dist/backend-server
+          retention-days: 14
+
+  # -----------------------------------------------------------------
+  # Build the React frontend.
+  # -----------------------------------------------------------------
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: enterprise-ai-assistant/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: enterprise-ai-assistant/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: enterprise-ai-assistant/frontend/dist
+          retention-days: 14
+
+  # -----------------------------------------------------------------
+  # Download native models + llama-server + sqlite-vec (Windows).
+  # -----------------------------------------------------------------
+  models:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: enterprise-ai-assistant
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download models and native binaries
+        env:
+          EAI_LARGE_MODEL: ${{ github.event.inputs.large_model || 'false' }}
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
+          powershell -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: models-and-binaries
+          path: |
+            enterprise-ai-assistant/models
+            enterprise-ai-assistant/llm
+            enterprise-ai-assistant/extensions
+            enterprise-ai-assistant/prerequisites
+          retention-days: 14
+
+  # -----------------------------------------------------------------
+  # Package the Electron app into setup.exe via electron-builder/NSIS.
+  # -----------------------------------------------------------------
+  electron-installer:
+    needs: [backend, frontend, models]
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: enterprise-ai-assistant/desktop-electron
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download backend
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-windows
+          path: enterprise-ai-assistant/backend/dist/backend-server
+
+      - name: Download frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: enterprise-ai-assistant/frontend/dist
+
+      - name: Download models & binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: models-and-binaries
+          path: enterprise-ai-assistant
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: enterprise-ai-assistant/desktop-electron/package-lock.json
+
+      - name: Install Electron dependencies
+        run: npm install
+
+      - name: Build NSIS installer
+        run: npm run dist
+
+      - name: Rename installer to setup.exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem ..\dist-electron\*.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path ..\release
+          Copy-Item $exe.FullName ..\release\setup.exe -Force
+
+      - name: Create final ZIP
+        shell: pwsh
+        working-directory: enterprise-ai-assistant
+        run: |
+          New-Item -ItemType Directory -Force -Path stage\prerequisites
+          Copy-Item release\setup.exe stage\setup.exe -Force
+          if (Test-Path prerequisites\vc_redist.x64.exe) { Copy-Item prerequisites\vc_redist.x64.exe stage\prerequisites\ -Force }
+          if (Test-Path prerequisites\MicrosoftEdgeWebView2Setup.exe) { Copy-Item prerequisites\MicrosoftEdgeWebView2Setup.exe stage\prerequisites\ -Force }
+          Copy-Item README.txt stage\; Copy-Item LICENSE.txt stage\
+          Compress-Archive -Path stage\* -DestinationPath release\Enterprise-AI-Assistant-Setup.zip -Force
+
+      - name: Upload setup.exe + ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: EnterpriseAI-Setup
+          path: enterprise-ai-assistant/release
+          retention-days: 30
+
+      - name: Publish GitHub Release (on main tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: enterprise-ai-assistant/release/*
