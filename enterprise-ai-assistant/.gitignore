@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-build/
+backend/dist/
+backend/build/
+backend/*.spec.bak
+
+# Node / frontend
+node_modules/
+frontend/dist/
+desktop/node_modules/
+desktop/src-tauri/target/
+
+# Models & large binaries
+models/llm/*.gguf
+models/embedding/model.onnx
+models/reranker/model.onnx
+llm/*.exe
+llm/*.zip
+extensions/*.dll
+
+# Build output
+dist/
+dist-installer/
+*.log
+
+# User data (local dev)
+*.db
+*.db-wal
+*.db-shm
+storage/
