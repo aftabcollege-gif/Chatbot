@@ -1,0 +1,75 @@
+app:
+  name: "دستیار هوشمند سازمانی"
+  version: "1.0.0"
+  language: "fa"
+  theme: "dark"
+  port: 8741
+  host: "127.0.0.1"
+
+llm:
+  provider: "llamacpp"
+  server_host: "127.0.0.1"
+  server_port: 8742
+  # Default lightweight model for 8GB systems; the desktop shells auto-select
+  # the strongest model present (7B preferred when available).
+  model_name: "qwen2.5-1.5b-instruct"
+  model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  context_size: 4096
+  temperature: 0.1
+  max_tokens: 2048
+  threads: 0
+  gpu_layers: 0
+
+embedding:
+  model_path: "models/embedding"
+  dimension: 1024
+  batch_size: 16
+
+reranker:
+  model_path: "models/reranker"
+  top_k: 5
+
+rag:
+  chunk_size: 512
+  chunk_overlap: 50
+  retrieval_top_k: 20
+  reranker_top_k: 5
+  context_max_tokens: 3000
+  chat_history_max_tokens: 1500
+  min_confidence: 0.3
+
+ocr:
+  provider: "tesseract"
+  languages: ["fa", "en"]
+
+auth:
+  jwt_secret: "CHANGE_THIS_ON_FIRST_RUN"
+  jwt_refresh_secret: "CHANGE_THIS_ON_FIRST_RUN"
+  jwt_expiry_minutes: 60
+  jwt_refresh_days: 7
+  max_login_attempts: 5
+  lockout_minutes: 15
+
+storage:
+  max_file_size_mb: 100
+  allowed_types:
+    - pdf
+    - docx
+    - xlsx
+    - pptx
+    - txt
+    - md
+    - csv
+    - html
+    - json
+    - xml
+    - odt
+    - epub
+
+database:
+  path: ""
+
+backup:
+  enabled: true
+  max_backups: 10
+  auto_backup_on_startup: true

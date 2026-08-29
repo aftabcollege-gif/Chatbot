@@ -1,0 +1,98 @@
+{
+  "name": "enterprise-ai-desktop-electron",
+  "version": "1.0.0",
+  "description": "دستیار هوشمند سازمانی — پوسته دسکتاپ (Electron + NSIS)",
+  "author": "Enterprise AI",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env EAI_DEV=1 electron .",
+    "dist": "electron-builder",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3",
+    "cross-env": "^7.0.3"
+  },
+  "build": {
+    "appId": "com.enterpriseai.assistant",
+    "productName": "EnterpriseAI",
+    "directories": {
+      "output": "../dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "splash.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/backend-server",
+        "to": "backend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../frontend/dist",
+        "to": "frontend/dist",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../config",
+        "to": "config",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../llm",
+        "to": "llm",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../models",
+        "to": "models",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../extensions",
+        "to": "extensions",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "msi",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "msi": {
+      "oneClick": false,
+      "perMachine": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "دستیار هوشمند سازمانی"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "دستیار هوشمند سازمانی",
+      "include": "installer.nsh",
+      "languages": ["1065", "1033"]
+    }
+  }
+}

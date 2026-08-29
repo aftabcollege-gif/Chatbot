@@ -1,0 +1,20 @@
+Enterprise AI Assistant — End User License Agreement (EULA)
+
+Copyright (c) 2026 Enterprise AI. All rights reserved.
+
+This software is provided as a fully on-premise, offline application. No data is
+sent to any external server by the application. Third-party components retain
+their respective open-source licenses (MIT, Apache 2.0, and others — see
+NOTICES in the source repository).
+
+1. You may install and use this software on devices owned or controlled by your
+   organization.
+2. You may not reverse-engineer, resell, or redistribute the application except
+   as expressly permitted in writing.
+3. The software is provided "AS IS", without warranty of any kind. The authors
+   are not liable for any claim, damages, or other liability arising from its
+   use.
+4. All bundled AI models (Qwen2.5, BGE-M3, bge-reranker) are subject to their
+   respective upstream licenses.
+
+For the full source and build instructions see README.txt.
