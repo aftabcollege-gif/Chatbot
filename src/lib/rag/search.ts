@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { db } from "@/db";
+import { db, isPortableDatabase } from "@/db";
 import { config } from "@/lib/config";
 import { getEmbeddingProvider } from "@/lib/ai/provider-factory";
 
@@ -135,7 +135,11 @@ export async function hybridSearch(organizationId: string, rawQuery: string): Pr
   }
 
   const [vectorRows, keywordRows] = await Promise.all([
-    queryEmbedding
+    // PGlite is an embedded PostgreSQL runtime and intentionally ships
+    // without the pgvector extension. The portable build remains fully
+    // offline by using PostgreSQL full-text retrieval; server deployments
+    // can still use the pgvector path.
+    queryEmbedding && !isPortableDatabase
       ? vectorSearch(organizationId, queryEmbedding, candidatePoolSize)
       : Promise.resolve([] as VectorRow[]),
     keywordSearch(organizationId, query, candidatePoolSize),

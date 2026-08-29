@@ -10,6 +10,9 @@ const nextConfig: NextConfig = {
     "tesseract.js",
     "pdf-parse",
     "mammoth",
+    // PGlite loads its WASM binary from its package at runtime. Bundling it
+    // with Turbopack changes the loader and causes instantiateWasm failures.
+    "@electric-sql/pglite",
   ],
 };
 
