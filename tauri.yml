@@ -1,0 +1,59 @@
+name: Build Tauri (Inno Setup)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: enterprise-ai-assistant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.11", architecture: "x64" }
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Add Rust target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Install Python deps + build backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pyinstaller
+          cd backend; pyinstaller --noconfirm --clean backend-server.spec; cd ..
+
+      - name: Download models & prerequisites
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
+          powershell -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          cd ..
+
+      - name: Build Tauri app + NSIS/MSI
+        run: |
+          cd desktop
+          npm install
+          npx tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-windows-bundle
+          path: |
+            enterprise-ai-assistant/desktop/src-tauri/target/release/bundle/**/*.exe
+            enterprise-ai-assistant/desktop/src-tauri/target/release/bundle/**/*.msi
+          retention-days: 30
