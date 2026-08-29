@@ -13,10 +13,19 @@ import yaml
 def _app_root() -> Path:
     """Root install directory.
 
-    When frozen by PyInstaller, data files live next to the executable
-    (sys._MEIPASS is for bundled temp data; we prefer the install dir for
-    large assets like models).
+    Resolution order:
+      1. ``EAI_ROOT`` env var — set by the desktop shell to point the frozen
+         backend at the bundled resources directory (which contains config/,
+         frontend/dist, models/, llm/, extensions/). This is what makes the
+         packaged app find its assets on an offline machine.
+      2. When frozen by PyInstaller, the directory containing the executable
+         (sys._MEIPASS is for bundled temp data; large assets like models live
+         next to the executable / in the install dir).
+      3. Source checkout: backend/core/config.py -> backend -> root.
     """
+    env_root = os.environ.get("EAI_ROOT")
+    if env_root:
+        return Path(env_root)
     if getattr(__import__("sys"), "frozen", False):
         return Path(__import__("sys").executable).resolve().parent
     # backend/core/config.py -> backend -> root
@@ -243,6 +252,9 @@ class Config:
 
     @property
     def frontend_dist(self) -> Path:
+        env_dist = os.environ.get("EAI_FRONTEND_DIST")
+        if env_dist:
+            return Path(env_dist)
         return self.root / "frontend" / "dist"
 
 

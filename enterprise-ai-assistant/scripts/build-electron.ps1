@@ -24,14 +24,11 @@ python -m venv ..\.venv-build
 ..\.venv-build\Scripts\pyinstaller --noconfirm backend-server.spec
 Pop-Location
 
-Write-Host "==> [4/6] Copying prerequisites into the Electron build resources..." -ForegroundColor Cyan
-New-Item -ItemType Directory -Force -Path desktop-electron\build | Out-Null
-if (Test-Path prerequisites\vc_redist.x64.exe) {
-    Copy-Item prerequisites\vc_redist.x64.exe "$env:TEMP\vc_redist.x64.exe" -Force
+Write-Host "==> [4/6] Verifying prerequisites (bundled into setup.exe via extraResources)..." -ForegroundColor Cyan
+if (-not (Test-Path prerequisites\vc_redist.x64.exe)) {
+    throw "Missing prerequisites\vc_redist.x64.exe. Run scripts\download-prerequisites.ps1 first."
 }
-if (Test-Path prerequisites\MicrosoftEdgeWebView2Setup.exe) {
-    Copy-Item prerequisites\MicrosoftEdgeWebView2Setup.exe "$env:TEMP\MicrosoftEdgeWebView2Setup.exe" -Force
-}
+Write-Host "  prerequisites\vc_redist.x64.exe will be bundled into the installer (offline)." -ForegroundColor Green
 
 Write-Host "==> [5/6] Packaging Electron app (NSIS installer)..." -ForegroundColor Cyan
 Push-Location desktop-electron

@@ -81,6 +81,10 @@ function startBackend() {
       ...process.env,
       APP_HOST: "127.0.0.1",
       APP_PORT: String(BACKEND_PORT),
+      // Point the frozen backend at the bundled resources folder so it can
+      // find config/, frontend/dist, models/, llm/ and extensions/ on an
+      // offline, fully self-contained install.
+      EAI_ROOT: resourcePath(),
     },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],

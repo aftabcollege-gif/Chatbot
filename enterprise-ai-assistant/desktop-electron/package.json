@@ -58,6 +58,12 @@
         "from": "../extensions",
         "to": "extensions",
         "filter": ["**/*"]
+      },
+      {
+        "from": "../prerequisites",
+        "to": "prerequisites",
+        "filter": ["**/*"],
+        "description": "Bundled offline prerequisites (Visual C++ Redistributable)"
       }
     ],
     "win": {
