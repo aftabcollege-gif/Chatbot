@@ -136,7 +136,7 @@ jobs:
   # Package the Electron app into both NSIS setup.exe and MSI.
   # -----------------------------------------------------------------
   installer:
-    needs: [backend, frontend, models]
+    needs: [matrix-prep, backend, frontend, models]
     runs-on: windows-latest
     strategy:
       matrix:
