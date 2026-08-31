@@ -78,7 +78,7 @@
       "perMachine": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "دستیار هوشمند سازمانی"
+      "shortcutName": "Enterprise AI Assistant"
     },
     "nsis": {
       "oneClick": false,
