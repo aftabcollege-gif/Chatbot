@@ -92,7 +92,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "دستیار هوشمند سازمانی",
       "include": "installer.nsh",
-      "languages": ["1065", "1033"]
+      "installerLanguages": ["fa_IR", "en_US"]
     }
   }
 }
