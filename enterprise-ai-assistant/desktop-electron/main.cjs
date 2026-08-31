@@ -55,6 +55,9 @@ function llamaExe() {
 function modelPath() {
   const candidates = [
     resourcePath("models", "llm", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
+    // 7B is split into two GGUF shards; llama-server auto-loads both when
+    // pointed at the first shard.
+    resourcePath("models", "llm", "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"),
     resourcePath("models", "llm", "qwen2.5-7b-instruct-q4_k_m.gguf"),
   ];
   for (const c of candidates) if (fs.existsSync(c)) return c;
