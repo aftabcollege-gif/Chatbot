@@ -3,6 +3,8 @@
 # at runtime the app makes zero network requests.
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+# Remove a stale success marker so a re-run cannot mask a fresh failure.
+Remove-Item "$Root\.models-download-ok" -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$Root\models\llm","$Root\models\embedding","$Root\models\reranker","$Root\llm","$Root\extensions" | Out-Null
 
 function Download($url, $dest) {
@@ -100,4 +102,8 @@ foreach ($f in $required) {
     Write-Host "  ok: $f ($size MB)"
 }
 
+# Success marker: download-prerequisites.ps1 verifies this file and fails the
+# workflow step if the model download failed (the step's exit code is taken
+# from the last powershell command).
+Set-Content -Path "$Root\.models-download-ok" -Value (Get-Date -Format o)
 Write-Host "Models and binaries ready." -ForegroundColor Green
