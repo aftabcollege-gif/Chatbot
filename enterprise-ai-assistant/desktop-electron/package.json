@@ -78,7 +78,7 @@
       "perMachine": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "دستیار هوشمند سازمانی"
+      "shortcutName": "Enterprise AI Assistant"
     },
     "nsis": {
       "oneClick": false,
@@ -91,8 +91,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "دستیار هوشمند سازمانی",
-      "include": "installer.nsh",
-      "languages": ["1065", "1033"]
+      "include": "installer.nsh"
     }
   }
 }
