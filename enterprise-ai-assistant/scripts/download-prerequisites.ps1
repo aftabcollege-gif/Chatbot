@@ -13,4 +13,12 @@ foreach ($k in $files.Keys) {
     Write-Host "downloading $k..."
     Invoke-WebRequest -Uri $files[$k] -OutFile $dest -UseBasicParsing
 }
+
+# Verify the models step actually succeeded. In the CI workflows this script
+# runs last, so throwing here fails the step (otherwise a failed model
+# download would be silently masked by this script's exit code).
+if (-not (Test-Path "$Root\.models-download-ok")) {
+    throw "Model download did not complete (missing .models-download-ok). Run scripts\download-models.ps1 and check its output."
+}
+
 Write-Host "Prerequisites ready." -ForegroundColor Green
