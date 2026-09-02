@@ -210,6 +210,24 @@ jobs:
 
       - name: Publish GitHub Release (on main tags)
         if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish setup.exe to GitHub Release (setup-latest)
+        # Every successful build publishes the installers to the "setup-latest"
+        # release so there is always a direct download link for setup.exe:
+        #   https://github.com/aftabcollege-gif/Chatbot/releases/download/setup-latest/setup.exe
+        # Gated to the 1.5b matrix leg to avoid racing tag updates.
+        if: matrix.model == '1.5b'
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: setup-latest
+          target_commitish: ${{ github.sha }}
+          update_existing_release: true
+          body: |
+            خودکار از آخرین build موفق — چت‌بات سازمانی آفلاین
+            ساخته‌شده توسط workflow «Build Windows Installer».
+
+            فایل‌ها:
+            - `setup.exe` (NSIS) — نصب‌کنندهٔ ویندوز
+            - `EnterpriseAI.msi` — بستهٔ MSI
+            - `Enterprise-AI-Assistant-Setup-1.5b.zip` — بستهٔ کامل
           files: enterprise-ai-assistant/release-${{ matrix.model }}/*
