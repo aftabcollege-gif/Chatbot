@@ -1,5 +1,10 @@
 name: Build Windows Installer
 
+# Allow publishing releases (setup-latest). Overrides the
+# repository default if it is set to read-only.
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main, master, "arena/**"]
@@ -228,4 +233,9 @@ jobs:
             - `setup.exe` (NSIS) — نصب‌کنندهٔ ویندوز
             - `EnterpriseAI.msi` — بستهٔ MSI
             - `Enterprise-AI-Assistant-Setup-1.5b.zip` — بستهٔ کامل
-          files: enterprise-ai-assistant/release-${{ matrix.model }}/*
+          # GitHub API attaches at most 2 GB per Release asset, so the full
+          # bundle ZIP (~4-5 GB) cannot go to a Release; it remains available
+          # as a workflow artifact ("EnterpriseAI-Setup-1.5b") instead.
+          files: |
+            enterprise-ai-assistant/release-${{ matrix.model }}/setup.exe
+            enterprise-ai-assistant/release-${{ matrix.model }}/EnterpriseAI.msi
