@@ -94,19 +94,18 @@ for the Tauri/Inno build instead of Electron/NSIS.
 You can also run the workflow manually from the **Actions** tab
 ("Build Windows Installer" → *Run workflow*).
 
+### Release channel (`setup-latest`)
+
+Each successful build publishes the installers to the GitHub Release tagged
+`setup-latest`, so the newest `setup.exe` always has a stable, direct link:
+
+```text
+https://github.com/aftabcollege-gif/Chatbot/releases/download/setup-latest/setup.exe
+```
+
+The release also carries `EnterpriseAI.msi` and
+`Enterprise-AI-Assistant-Setup-1.5b.zip` (full portable bundle).
+
 ### Model selection
 
 By default the lightweight **Qwen2.5-1.5B-Instruct (Q4_K_M, ~1 GB)** is bundled,
-which runs well on 8 GB machines. To bundle the stronger 7B model (~5 GB, 16 GB
-recommended), set `$env:EAI_LARGE_MODEL="1"` before running
-`download-models.ps1`. The desktop shells auto-detect and prefer the strongest
-model present.
-
-## Security
-
-- All services bind to `127.0.0.1` only; no ports exposed to the network.
-- Argon2 password hashing, JWT (access + rotating refresh) sessions, RBAC.
-- Object-level authorization on documents/knowledge; full audit log.
-- No telemetry; no outbound calls.
-
-See `README.txt` (Persian) for the end-user guide.
