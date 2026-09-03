@@ -1,7 +1,5 @@
 name: Build Windows Installer
 
-# Allow publishing releases (setup-latest). Overrides the
-# repository default if it is set to read-only.
 permissions:
   contents: write
 
@@ -10,20 +8,20 @@ on:
     branches: [main, master, "arena/**"]
     paths:
       - "enterprise-ai-assistant/**"
-      - ".github/workflows/build-windows.yml"
+      - ".github/workflows/**"
   workflow_dispatch:
     inputs:
       model:
-        description: "Which LLM model to bundle"
+        description: "LLM model to bundle"
         required: true
         type: choice
         default: "1.5b"
-        options:
-          - "1.5b"
-          - "7b"
-          - "both"
+        options: ["1.5b", "7b", "both"]
 
-# Build once per model; the matrix is driven by the dispatch input or push default.
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   matrix-prep:
     runs-on: ubuntu-latest
@@ -31,22 +29,19 @@ jobs:
       models: ${{ steps.set.outputs.models }}
     steps:
       - id: set
+        shell: bash
         run: |
-          if [ "${{ github.event.inputs.model }}" = "7b" ]; then
-            echo 'models=["7b"]' >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.inputs.model }}" = "both" ]; then
-            echo 'models=["1.5b","7b"]' >> "$GITHUB_OUTPUT"
-          else
-            echo 'models=["1.5b"]' >> "$GITHUB_OUTPUT"
-          fi
+          case "${{ inputs.model }}" in
+            7b) echo 'models=["7b"]' >> "$GITHUB_OUTPUT" ;;
+            both) echo 'models=["1.5b","7b"]' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'models=["1.5b"]' >> "$GITHUB_OUTPUT" ;;
+          esac
 
-  # -----------------------------------------------------------------
-  # Build a standalone backend-server.exe with PyInstaller on Windows.
-  # -----------------------------------------------------------------
   backend:
     needs: matrix-prep
     runs-on: windows-latest
     strategy:
+      fail-fast: true
       matrix:
         model: ${{ fromJson(needs.matrix-prep.outputs.models) }}
     defaults:
@@ -54,35 +49,28 @@ jobs:
         working-directory: enterprise-ai-assistant
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           architecture: "x64"
           cache: pip
           cache-dependency-path: enterprise-ai-assistant/backend/requirements.txt
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pyinstaller
-
-      - name: Build backend-server.exe (PyInstaller onedir)
+      - name: Build backend-server.exe
         run: |
           cd backend
           pyinstaller --noconfirm --clean backend-server.spec
-
-      - name: Upload backend artifact
-        uses: actions/upload-artifact@v4
+          if (!(Test-Path "dist/backend-server/backend-server.exe")) { throw "backend-server.exe was not produced" }
+      - uses: actions/upload-artifact@v4
         with:
           name: backend-windows-${{ matrix.model }}
           path: enterprise-ai-assistant/backend/dist/backend-server
-          retention-days: 14
+          if-no-files-found: error
+          retention-days: 7
 
-  # -----------------------------------------------------------------
-  # Build the React frontend.
-  # -----------------------------------------------------------------
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -101,16 +89,14 @@ jobs:
         with:
           name: frontend-dist
           path: enterprise-ai-assistant/frontend/dist
-          retention-days: 14
+          if-no-files-found: error
+          retention-days: 7
 
-  # -----------------------------------------------------------------
-  # Download native models + llama-server + sqlite-vec (Windows).
-  # matrix.model selects 1.5B vs 7B.
-  # -----------------------------------------------------------------
   models:
     needs: matrix-prep
     runs-on: windows-latest
     strategy:
+      fail-fast: true
       matrix:
         model: ${{ fromJson(needs.matrix-prep.outputs.models) }}
     defaults:
@@ -118,15 +104,36 @@ jobs:
         working-directory: enterprise-ai-assistant
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download models and native binaries
+      - name: Download models, CPU runtime and prerequisites
         env:
           EAI_LARGE_MODEL: ${{ matrix.model == '7b' && '1' || '0' }}
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
-          powershell -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
-
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\download-models.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Model/runtime download failed" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Prerequisite download failed" }
+      - name: Verify bundle inputs
+        shell: pwsh
+        run: |
+          $required = @(
+            "models\llm\qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            "models\embedding\model.onnx",
+            "models\embedding\tokenizer.json",
+            "models\reranker\model.onnx",
+            "models\reranker\tokenizer.json",
+            "llm\llama-server.exe",
+            "extensions\sqlite_vec.dll",
+            "prerequisites\vc_redist.x64.exe"
+          )
+          if ($env:EAI_LARGE_MODEL -eq "1") {
+            $required += "models\llm\qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+            $required += "models\llm\qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf"
+          }
+          foreach ($f in $required) {
+            if (!(Test-Path $f)) { throw "Missing bundle input: $f" }
+          }
+          Get-FileHash llm\llama-server.exe -Algorithm SHA256 | Format-List
       - uses: actions/upload-artifact@v4
         with:
           name: models-and-binaries-${{ matrix.model }}
@@ -135,15 +142,14 @@ jobs:
             enterprise-ai-assistant/llm
             enterprise-ai-assistant/extensions
             enterprise-ai-assistant/prerequisites
-          retention-days: 14
+          if-no-files-found: error
+          retention-days: 7
 
-  # -----------------------------------------------------------------
-  # Package the Electron app into both NSIS setup.exe and MSI.
-  # -----------------------------------------------------------------
   installer:
     needs: [matrix-prep, backend, frontend, models]
     runs-on: windows-latest
     strategy:
+      fail-fast: true
       matrix:
         model: ${{ fromJson(needs.matrix-prep.outputs.models) }}
     defaults:
@@ -151,91 +157,82 @@ jobs:
         working-directory: enterprise-ai-assistant/desktop-electron
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download backend
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: backend-windows-${{ matrix.model }}
           path: enterprise-ai-assistant/backend/dist/backend-server
-
-      - name: Download frontend
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: enterprise-ai-assistant/frontend/dist
-
-      - name: Download models & binaries
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: models-and-binaries-${{ matrix.model }}
           path: enterprise-ai-assistant
-
+      - name: Verify packaging inputs
+        shell: pwsh
+        working-directory: enterprise-ai-assistant
+        run: |
+          if (!(Test-Path "backend\dist\backend-server\backend-server.exe")) { throw "Backend artifact missing" }
+          if (!(Test-Path "frontend\dist\index.html")) { throw "Frontend artifact missing" }
+          if (!(Test-Path "llm\llama-server.exe")) { throw "llama-server.exe missing" }
+          if (!(Test-Path "models\llm\qwen2.5-1.5b-instruct-q4_k_m.gguf")) { throw "1.5B model missing" }
+          if (!(Test-Path "models\embedding\model.onnx")) { throw "Embedding model missing" }
+          if (!(Test-Path "models\reranker\model.onnx")) { throw "Reranker missing" }
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: enterprise-ai-assistant/desktop-electron/package-lock.json
-
       - name: Install Electron dependencies
-        run: npm install
-
-      - name: Build NSIS + MSI installers
+        run: npm ci
+      - name: Build standalone NSIS + MSI
         run: npm run dist
-
-      - name: Collect installers (setup.exe and .msi)
+      - name: Verify generated installers
         shell: pwsh
         working-directory: enterprise-ai-assistant
         run: |
-          New-Item -ItemType Directory -Force -Path release-${{ matrix.model }} | Out-Null
-          Get-ChildItem dist-electron\*.exe, dist-electron\*.msi | ForEach-Object {
-            if ($_.Name -match 'Setup.*\.exe$') {
-              Copy-Item $_.FullName "release-${{ matrix.model }}\setup.exe" -Force
-            } else {
-              Copy-Item $_.FullName "release-${{ matrix.model }}\" -Force
-            }
-          }
-          New-Item -ItemType Directory -Force -Path stage-${{ matrix.model }}\prerequisites | Out-Null
-          Copy-Item "release-${{ matrix.model }}\setup.exe" "stage-${{ matrix.model }}\" -Force
-          Get-ChildItem "release-${{ matrix.model }}\*.msi" | ForEach-Object { Copy-Item $_.FullName "stage-${{ matrix.model }}\" -Force }
-          if (Test-Path prerequisites\vc_redist.x64.exe) {
-            Copy-Item prerequisites\vc_redist.x64.exe "stage-${{ matrix.model }}\prerequisites\" -Force
-          }
-          if (Test-Path prerequisites\MicrosoftEdgeWebView2Setup.exe) {
-            Copy-Item prerequisites\MicrosoftEdgeWebView2Setup.exe "stage-${{ matrix.model }}\prerequisites\" -Force
-          }
-          Copy-Item README.txt, LICENSE.txt "stage-${{ matrix.model }}\"
-          Compress-Archive -Path "stage-${{ matrix.model }}\*" -DestinationPath "release-${{ matrix.model }}\Enterprise-AI-Assistant-Setup-${{ matrix.model }}.zip" -Force
-
-      - name: Upload ${{ matrix.model }} installers
-        uses: actions/upload-artifact@v4
+          $exe = Get-ChildItem dist-electron -Filter "*.exe" | Where-Object { $_.Name -match "Setup" } | Select-Object -First 1
+          $msi = Get-ChildItem dist-electron -Filter "*.msi" | Select-Object -First 1
+          if (!$exe) { throw "NSIS setup.exe was not generated" }
+          if (!$msi) { throw "MSI was not generated" }
+          Write-Host "NSIS: $($exe.FullName) $([math]::Round($exe.Length/1GB,2)) GB"
+          Write-Host "MSI : $($msi.FullName) $([math]::Round($msi.Length/1GB,2)) GB"
+      - name: Create release package and checksums
+        shell: pwsh
+        working-directory: enterprise-ai-assistant
+        run: |
+          $release = "release-${{ matrix.model }}"
+          $stage = "stage-${{ matrix.model }}"
+          New-Item -ItemType Directory -Force -Path $release,$stage | Out-Null
+          $exe = Get-ChildItem dist-electron -Filter "*.exe" | Where-Object { $_.Name -match "Setup" } | Select-Object -First 1
+          $msi = Get-ChildItem dist-electron -Filter "*.msi" | Select-Object -First 1
+          Copy-Item $exe.FullName "$stage\Chatbot-Enterprise-Setup-${{ matrix.model }}.exe" -Force
+          Copy-Item $msi.FullName "$stage\Chatbot-Enterprise-${{ matrix.model }}.msi" -Force
+          Copy-Item README.txt,LICENSE.txt "$stage\" -Force
+          Get-FileHash "$stage\*.exe","$stage\*.msi" -Algorithm SHA256 | Out-File "$stage\SHA256SUMS.txt" -Encoding utf8
+          Compress-Archive -Path "$stage\*" -DestinationPath "$release\Chatbot-Enterprise-Offline-${{ matrix.model }}.zip" -Force
+          Copy-Item "$stage\*.exe","stage\*.msi" "$release\" -Force -ErrorAction SilentlyContinue
+          Get-FileHash "$release\*.exe","$release\*.msi","$release\*.zip" -Algorithm SHA256 | Out-File "$release\SHA256SUMS.txt" -Encoding utf8
+      - uses: actions/upload-artifact@v4
         with:
-          name: EnterpriseAI-Setup-${{ matrix.model }}
+          name: Chatbot-Enterprise-Windows-${{ matrix.model }}
           path: enterprise-ai-assistant/release-${{ matrix.model }}
+          if-no-files-found: error
           retention-days: 30
-
-      - name: Publish setup.exe to GitHub Release (setup-latest)
-        # Every successful build publishes the installers to the "setup-latest"
-        # release so there is always a direct download link for setup.exe:
-        #   https://github.com/aftabcollege-gif/Chatbot/releases/download/setup-latest/setup.exe
-        # Gated to the 1.5b matrix leg to avoid racing tag updates.
+      - name: Publish 1.5B installer to rolling GitHub Release
         if: matrix.model == '1.5b'
-        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: setup-latest
           target_commitish: ${{ github.sha }}
-          update_existing_release: true
+          make_latest: true
+          fail_on_unmatched_files: true
           body: |
-            خودکار از آخرین build موفق — چت‌بات سازمانی آفلاین
-            ساخته‌شده توسط workflow «Build Windows Installer».
-
-            فایل‌ها:
-            - `setup.exe` (NSIS) — نصب‌کنندهٔ ویندوز
-            - `EnterpriseAI.msi` — بستهٔ MSI
-            - `Enterprise-AI-Assistant-Setup-1.5b.zip` — بستهٔ کامل
-          # GitHub API attaches at most 2 GB per Release asset, so the full
-          # bundle ZIP (~4-5 GB) cannot go to a Release; it remains available
-          # as a workflow artifact ("EnterpriseAI-Setup-1.5b") instead.
+            آخرین نسخهٔ Windows Offline Chatbot.
+            مدل LLM، Embedding، Reranker، llama.cpp و runtime لازم داخل installer بسته‌بندی شده‌اند.
+            پس از نصب، اجرای برنامه به اینترنت نیاز ندارد.
           files: |
-            enterprise-ai-assistant/release-${{ matrix.model }}/setup.exe
-            enterprise-ai-assistant/release-${{ matrix.model }}/EnterpriseAI.msi
+            enterprise-ai-assistant/release-${{ matrix.model }}/*.exe
+            enterprise-ai-assistant/release-${{ matrix.model }}/*.msi
+            enterprise-ai-assistant/release-${{ matrix.model }}/SHA256SUMS.txt
