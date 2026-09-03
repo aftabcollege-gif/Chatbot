@@ -1,7 +1,7 @@
 {
   "name": "enterprise-ai-desktop-electron",
   "version": "1.0.0",
-  "description": "دستیار هوشمند سازمانی — پوسته دسکتاپ (Electron + NSIS)",
+  "description": "دستیار هوشمند سازمانی — پوسته دسکتاپ مستقل آفلاین",
   "author": "Enterprise AI",
   "license": "SEE LICENSE IN LICENSE.txt",
   "main": "main.cjs",
@@ -12,13 +12,14 @@
     "pack": "electron-builder --dir"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "electron": "^31.3.1",
-    "electron-builder": "^24.13.3",
-    "cross-env": "^7.0.3"
+    "electron-builder": "^24.13.3"
   },
   "build": {
     "appId": "com.enterpriseai.assistant",
-    "productName": "EnterpriseAI",
+    "productName": "Chatbot Enterprise",
+    "artifactName": "Chatbot-Enterprise-${version}-${arch}.${ext}",
     "directories": {
       "output": "../dist-electron",
       "buildResources": "build"
@@ -29,47 +30,18 @@
       "splash.html"
     ],
     "extraResources": [
-      {
-        "from": "../backend/dist/backend-server",
-        "to": "backend",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "../frontend/dist",
-        "to": "frontend/dist",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "../config",
-        "to": "config",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "../llm",
-        "to": "llm",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "../models",
-        "to": "models",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "../extensions",
-        "to": "extensions",
-        "filter": ["**/*"]
-      }
+      { "from": "../backend/dist/backend-server", "to": "backend", "filter": ["**/*"] },
+      { "from": "../frontend/dist", "to": "frontend/dist", "filter": ["**/*"] },
+      { "from": "../config", "to": "config", "filter": ["**/*"] },
+      { "from": "../llm", "to": "llm", "filter": ["**/*"] },
+      { "from": "../models", "to": "models", "filter": ["**/*"] },
+      { "from": "../extensions", "to": "extensions", "filter": ["**/*"] },
+      { "from": "../prerequisites", "to": "prerequisites", "filter": ["**/*"] }
     ],
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": ["x64"]
-        },
-        {
-          "target": "msi",
-          "arch": ["x64"]
-        }
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "msi", "arch": ["x64"] }
       ],
       "icon": "build/icon.ico"
     },
@@ -78,7 +50,7 @@
       "perMachine": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Enterprise AI Assistant"
+      "shortcutName": "Chatbot Enterprise"
     },
     "nsis": {
       "oneClick": false,
