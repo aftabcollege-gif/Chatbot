@@ -94,3 +94,20 @@ def truncate_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return text
     return " ".join(words[:max_words]) + "…"
+
+
+def fts5_or_query(text: str, limit: int = 1000) -> str:
+    """Build a safe FTS5 MATCH expression from free text.
+
+    Every token is wrapped as a quoted phrase so that characters with a
+    special meaning in the FTS5 query language (``-``, ``*``, ``:``, ``(``,
+    quotes, …) can never break the query or change its semantics — e.g. an
+    unquoted ``GT-4821`` raises ``no such column: 4821``. Returns ``""``
+    when the text yields no tokens (callers must skip the MATCH query then).
+    """
+    parts: List[str] = []
+    for tok in tokenize(text):
+        t = tok.replace('"', '""').strip()
+        if t:
+            parts.append(f'"{t}"')
+    return " OR ".join(parts)[:limit]

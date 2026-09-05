@@ -1,0 +1,134 @@
+{
+  "files": 20000,
+  "load": {
+    "docs": 20000,
+    "chunks": 93049,
+    "load_wall_s": 117.77,
+    "embed_s": 55.19,
+    "insert_s": 47.88,
+    "vec_enabled": true
+  },
+  "rows": {
+    "documents": 20010,
+    "document_chunks": 93059,
+    "chunks_vec": 93059,
+    "chunks": 93059
+  },
+  "db_size_mb": 854.1,
+  "latency_admin": {
+    "embed_ms": {
+      "mean": 0.19,
+      "p50": 0.16,
+      "p95": 0.19,
+      "max": 1.16,
+      "n": 30
+    },
+    "fts_ms": {
+      "mean": 130.42,
+      "p50": 145.4,
+      "p95": 189.67,
+      "max": 191.65,
+      "n": 30
+    },
+    "vec_ms": {
+      "mean": 166.26,
+      "p50": 164.25,
+      "p95": 183.65,
+      "max": 187.12,
+      "n": 30
+    },
+    "retrieve_ms": {
+      "mean": 394.79,
+      "p50": 410.21,
+      "p95": 461.13,
+      "max": 471.17,
+      "n": 30
+    },
+    "rerank20_ms": {
+      "mean": 1.35,
+      "p50": 0.92,
+      "p95": 3.32,
+      "max": 3.69,
+      "n": 30
+    },
+    "assemble_ms": {
+      "mean": 0.01,
+      "p50": 0.01,
+      "p95": 0.02,
+      "max": 0.04,
+      "n": 30
+    }
+  },
+  "recall_admin": {
+    "exact": {
+      "n": 10,
+      "hybrid_top5": 1.0,
+      "fts_top20": 1.0,
+      "vec_top60": 1.0
+    },
+    "paraphrase": {
+      "n": 10,
+      "hybrid_top5": 0.4,
+      "fts_top20": 0.5,
+      "vec_top60": 0.3
+    }
+  },
+  "latency_user": {
+    "embed_ms": {
+      "mean": 0.15,
+      "p50": 0.14,
+      "p95": 0.19,
+      "max": 0.21,
+      "n": 30
+    },
+    "fts_ms": {
+      "mean": 124.04,
+      "p50": 142.38,
+      "p95": 173.16,
+      "max": 178.97,
+      "n": 30
+    },
+    "vec_ms": {
+      "mean": 158.28,
+      "p50": 156.34,
+      "p95": 168.94,
+      "max": 173.99,
+      "n": 30
+    },
+    "retrieve_ms": {
+      "mean": 380.19,
+      "p50": 396.14,
+      "p95": 428.0,
+      "max": 429.01,
+      "n": 30
+    },
+    "rerank20_ms": {
+      "mean": 1.3,
+      "p50": 0.91,
+      "p95": 3.24,
+      "max": 3.4,
+      "n": 30
+    },
+    "assemble_ms": {
+      "mean": 0.01,
+      "p50": 0.01,
+      "p95": 0.03,
+      "max": 0.04,
+      "n": 30
+    }
+  },
+  "recall_user": {
+    "exact": {
+      "n": 10,
+      "hybrid_top5": 1.0,
+      "fts_top20": 1.0,
+      "vec_top60": 1.0
+    },
+    "paraphrase": {
+      "n": 10,
+      "hybrid_top5": 0.4,
+      "fts_top20": 0.5,
+      "vec_top60": 0.3
+    }
+  }
+}

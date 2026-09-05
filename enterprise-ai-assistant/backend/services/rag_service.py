@@ -20,7 +20,7 @@ from core.config import settings
 from services.embedding_service import get_embedding_service
 from services.reranker_service import get_reranker_service
 from services import llm_service
-from utils.persian import detect_language, normalize_persian, tokenize
+from utils.persian import detect_language, fts5_or_query, normalize_persian, tokenize
 
 
 @dataclass
@@ -78,7 +78,9 @@ def _vec_search(
 
 def _fts_chunks(query: str, k: int, filters: str, params: List[Any]) -> List[Dict[str, Any]]:
     conn = db.get_conn()
-    match_q = " OR ".join(tokenize(query))[:1000] or query
+    match_q = fts5_or_query(query)
+    if not match_q:
+        return []
     # Visibility/ownership/department live on the documents table; chunks carry
     # organization_id for partitioning but inherit the rest from the document.
     sql = f"""
@@ -102,7 +104,9 @@ def _fts_chunks(query: str, k: int, filters: str, params: List[Any]) -> List[Dic
 
 def _fts_knowledge(query: str, k: int, filters: str, params: List[Any]) -> List[Dict[str, Any]]:
     conn = db.get_conn()
-    match_q = " OR ".join(tokenize(query))[:1000] or query
+    match_q = fts5_or_query(query)
+    if not match_q:
+        return []
     sql = f"""
         SELECT ki.id, ki.title, ki.lesson_learned AS content, ki.visibility,
                ki.owner_id, ki.department_id, ki.organization_id,
