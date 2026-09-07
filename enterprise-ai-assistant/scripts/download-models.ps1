@@ -9,7 +9,15 @@ $Root = Split-Path -Parent $PSScriptRoot
 
 # When running on GitHub Actions, mirror any fatal error into the run's public
 # Step Summary (the full logs require signing in, the summary page does not).
+function Write-Breadcrumb($Message) {
+    Write-Host "[stage] $Message"
+    if ($env:GITHUB_STEP_SUMMARY) {
+        try { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- $Message" -Encoding UTF8 } catch { }
+    }
+}
+
 function Write-SummaryFailure($Stage, $ErrorRecord) {
+    Write-Host "[failure at: $Stage]"
     if (-not $env:GITHUB_STEP_SUMMARY) { return }
     $lines = @(
         "## download-models.ps1 failed at: $Stage",
@@ -64,6 +72,7 @@ function DownloadFirst($urls, $dest, $minBytes = 1) {
 }
 
 try {
+    Write-Breadcrumb "script started (PS $($PSVersionTable.PSVersion), host=$env:COMPUTERNAME)"
     Remove-Item "$Root\.models-download-ok" -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path "$Root\models\llm","$Root\models\embedding","$Root\models\reranker","$Root\llm","$Root\extensions" | Out-Null
 
@@ -81,15 +90,23 @@ try {
         "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVer/llama-$llamaVer-bin-win-noavx-x64.zip"
     )
     DownloadFirst $llamaCandidates "$Root\llm\llama.zip" 5MB
+    Write-Breadcrumb "llama.zip downloaded ($([math]::Round((Get-Item "$Root\llm\llama.zip").Length / 1MB, 1)) MB)"
     Expand-Archive "$Root\llm\llama.zip" -DestinationPath "$Root\llm" -Force
+    Write-Breadcrumb "llama.zip extracted; entries: $((Get-ChildItem -Path "$Root\llm" -Recurse -File | Measure-Object).Count) files"
     $server = Get-ChildItem -Path "$Root\llm" -Recurse -Filter llama-server.exe | Select-Object -First 1
-    if (-not $server) { throw "llama-server.exe not found after extracting llama.cpp" }
+    if (-not $server) {
+        $listing = (Get-ChildItem -Path "$Root\llm" -Recurse -File | Select-Object -First 40 -ExpandProperty Name) -join ", "
+        throw "llama-server.exe not found after extracting llama.cpp. Archive contents: $listing"
+    }
     Get-ChildItem -Path $server.DirectoryName -File | ForEach-Object { Copy-Item $_.FullName "$Root\llm\$($_.Name)" -Force }
     if (-not (Test-Path "$Root\llm\llama-server.exe")) { throw "llama-server.exe missing" }
     Remove-Item "$Root\llm\llama.zip" -Force -ErrorAction SilentlyContinue
+    Write-Breadcrumb "llama-server.exe staged ($([math]::Round((Get-Item "$Root\llm\llama-server.exe").Length / 1MB, 1)) MB)"
 
     # Default lightweight LLM.
+    Write-Breadcrumb "downloading Qwen 1.5B GGUF (~1.0 GB)"
     Download "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf" "$Root\models\llm\qwen2.5-1.5b-instruct-q4_k_m.gguf" 900MB
+    Write-Breadcrumb "Qwen 1.5B GGUF done ($([math]::Round((Get-Item "$Root\models\llm\qwen2.5-1.5b-instruct-q4_k_m.gguf").Length / 1MB, 1)) MB)"
     if ($env:EAI_LARGE_MODEL -eq "1") {
         Download "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" "$Root\models\llm\qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" 3000MB
         Download "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf" "$Root\models\llm\qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf" 600MB
@@ -107,15 +124,18 @@ try {
         "https://huggingface.co/Xenova/bge-m3/resolve/main/onnx/model_quantized.onnx",
         "https://huggingface.co/Xenova/bge-m3/resolve/main/onnx/model_int8.onnx"
     ) "$Root\models\embedding\model.onnx" 400MB
+    Write-Breadcrumb "embedding ONNX done"
     Download "https://huggingface.co/Xenova/bge-m3/resolve/main/tokenizer.json" "$Root\models\embedding\tokenizer.json" 1MB
     DownloadFirst @(
         "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/onnx/model_quantized.onnx",
         "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/onnx/model_int8.onnx"
     ) "$Root\models\reranker\model.onnx" 400MB
+    Write-Breadcrumb "reranker ONNX done"
     Download "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/tokenizer.json" "$Root\models\reranker\tokenizer.json" 1MB
 
     # sqlite-vec native extension.
     $vecVer = "v0.1.3"
+    Write-Breadcrumb "downloading sqlite-vec"
     Download "https://github.com/asg017/sqlite-vec/releases/download/$vecVer/sqlite-vec-0.1.3-loadable-windows-x86_64.tar.gz" "$Root\extensions\vec.tar.gz" 50KB
     tar -xzf "$Root\extensions\vec.tar.gz" -C "$Root\extensions"
     if ($LASTEXITCODE -ne 0) { throw "tar failed to extract sqlite-vec (exit $LASTEXITCODE)" }
@@ -142,6 +162,7 @@ try {
         Write-Host "ok: $f ($([math]::Round((Get-Item $f).Length / 1MB, 1)) MB)"
     }
     Set-Content -Path "$Root\.models-download-ok" -Value (Get-Date -Format o)
+    Write-Breadcrumb "all offline runtime assets ready"
     Write-Host "Offline runtime assets ready." -ForegroundColor Green
 } catch {
     Write-SummaryFailure "download/verification" $_
