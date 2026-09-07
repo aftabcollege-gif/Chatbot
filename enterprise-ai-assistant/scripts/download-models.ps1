@@ -16,6 +16,15 @@ function Download($url, $dest) {
             Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
             if ((Test-Path $dest) -and ((Get-Item $dest).Length -gt 0)) { return }
         } catch {
+            # 404/410 are permanent: retrying cannot help, so fail immediately
+            # (lets DownloadFirst move on to the next candidate URL).
+            $status = 0
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $status = [int]$_.Exception.Response.StatusCode
+            }
+            if ($status -eq 404 -or $status -eq 410) {
+                throw "Failed to download $url : $($_.Exception.Message)"
+            }
             if ($attempt -eq 3) { throw "Failed to download $url : $($_.Exception.Message)" }
             Start-Sleep -Seconds 5
         }
@@ -23,9 +32,33 @@ function Download($url, $dest) {
     throw "Downloaded file is empty: $dest"
 }
 
+# Try a list of mirror/candidate URLs and keep the first one that succeeds.
+function DownloadFirst($urls, $dest) {
+    foreach ($url in $urls) {
+        try {
+            Download $url $dest
+            return
+        } catch {
+            Write-Warning "candidate unavailable, trying next: $url ($($_.Exception.Message))"
+        }
+    }
+    throw "All candidate downloads failed for $dest"
+}
+
 # CPU-only runtime so the standalone product works without CUDA/NVIDIA.
+# llama.cpp renamed their prebuilt CPU artifacts: older tags shipped
+# "llama-<tag>-bin-win-cpu-x64.zip" while newer tags (like b3800) ship
+# instruction-set variants instead (avx2 / avx / avx512 / noavx).
+# AVX2 covers virtually every x64 CPU since ~2013, so prefer it and fall
+# back to the other names for robustness.
 $llamaVer = "b3800"
-Download "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVer/llama-$llamaVer-bin-win-cpu-x64.zip" "$Root\llm\llama.zip"
+$llamaCandidates = @(
+    "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVer/llama-$llamaVer-bin-win-avx2-x64.zip",
+    "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVer/llama-$llamaVer-bin-win-cpu-x64.zip",
+    "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVer/llama-$llamaVer-bin-win-avx-x64.zip",
+    "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVer/llama-$llamaVer-bin-win-noavx-x64.zip"
+)
+DownloadFirst $llamaCandidates "$Root\llm\llama.zip"
 Expand-Archive "$Root\llm\llama.zip" -DestinationPath "$Root\llm" -Force
 $server = Get-ChildItem -Path "$Root\llm" -Recurse -Filter llama-server.exe | Select-Object -First 1
 if (-not $server) { throw "llama-server.exe not found after extracting llama.cpp" }
