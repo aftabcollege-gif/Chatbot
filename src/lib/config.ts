@@ -42,6 +42,18 @@ export const config = {
       process.env.LOCAL_EMBEDDING_MODEL_PATH ?? "./models/embeddings/model.gguf",
     ),
     dimensions: readNumber(process.env.LOCAL_EMBEDDING_DIMENSIONS, 1024),
+    // bge-m3 supports 8k tokens but chunks are small; 1024 keeps RAM low.
+    contextSize: readNumber(process.env.LOCAL_EMBEDDING_CONTEXT_SIZE, 1024),
+    threads: readNumber(process.env.LOCAL_EMBEDDING_THREADS, readNumber(process.env.LOCAL_LLM_THREADS, 4)),
+  },
+
+  ingest: {
+    // Number of documents processed concurrently by the background worker.
+    // Extraction/OCR is I/O + CPU bound and parallelises well; embedding is
+    // serialised by the runtime mutex regardless, so 2 is a safe default on
+    // 4-core machines. Raise on bigger servers.
+    concurrency: Math.max(1, readNumber(process.env.INGEST_CONCURRENCY, 2)),
+    pollIntervalMs: Math.max(250, readNumber(process.env.INGEST_POLL_INTERVAL_MS, 1000)),
   },
 
   rag: {

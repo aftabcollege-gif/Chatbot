@@ -6,13 +6,29 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { useAuth } from "@/lib/auth-context";
 import { Loader2, Bot } from "lucide-react";
-import type { Message } from "@/types/chat";
+import type { Message, Source } from "@/types/chat";
+import { sendChatMessage, ChatRequestError, type ChatSource } from "@/lib/chat-stream";
+
+function toUiSources(sources: ChatSource[]): Source[] {
+  return sources.map((s, index) => ({
+    id: s.id,
+    type: s.sourceType,
+    title: s.title,
+    pageNumber: s.pageNumber ?? undefined,
+    section: s.section ?? undefined,
+    heading: s.heading ?? undefined,
+    relevanceScore: s.relevanceScore,
+    snippet: s.excerpt,
+    citationIndex: index + 1,
+  }));
+}
 
 export default function ChatConversationPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [title, setTitle] = useState("گفتگوی جدید");
   const [initialLoading, setInitialLoading] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -48,8 +64,10 @@ export default function ChatConversationPage({ params }: { params: Promise<{ id:
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSend = async (content: string, scope: string) => {
+  const handleSend = async (content: string, _scope: string) => {
+    void _scope;
     const tempId = `temp-${Date.now()}`;
+    const tempAssistantId = `temp-assistant-${Date.now()}`;
     const userMsg: Message = {
       id: tempId,
       role: "user",
@@ -59,43 +77,64 @@ export default function ChatConversationPage({ params }: { params: Promise<{ id:
 
     setMessages((prev) => [...prev, userMsg]);
     setIsLoading(true);
+    setStreaming(false);
 
     try {
-      const res = await fetch(`/api/chat/conversations/${id}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, scope }),
+      let streamedSources: Source[] = [];
+      const data = await sendChatMessage(id, content, {
+        onSources: (sources) => {
+          streamedSources = toUiSources(sources);
+        },
+        onToken: (_text, accumulated) => {
+          setStreaming(true);
+          setMessages((prev) => {
+            const partial: Message = {
+              id: tempAssistantId,
+              role: "assistant",
+              content: accumulated,
+              sources: streamedSources,
+              createdAt: new Date().toISOString(),
+            };
+            return prev.some((m) => m.id === tempAssistantId)
+              ? prev.map((m) => (m.id === tempAssistantId ? partial : m))
+              : [...prev, partial];
+          });
+        },
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        setMessages((prev) => [
-          ...prev.filter((m) => m.id !== tempId),
-          {
-            id: data.userMessage.id,
-            role: "user" as const,
-            content: data.userMessage.content,
-            createdAt: data.userMessage.createdAt,
-          },
-          {
-            id: data.assistantMessage.id,
-            role: "assistant" as const,
-            content: data.assistantMessage.content,
-            confidenceScore: data.assistantMessage.confidenceScore,
-            createdAt: data.assistantMessage.createdAt,
-            sources: data.assistantMessage.sources,
-          },
-        ]);
-        
-        // Update title if it was auto-set
-        if (title === "گفتگوی جدید") {
-          setTitle(content.substring(0, 50) + (content.length > 50 ? "..." : ""));
-        }
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempId && m.id !== tempAssistantId),
+        {
+          id: data.userMessage.id,
+          role: "user" as const,
+          content: data.userMessage.content,
+          createdAt: data.userMessage.createdAt,
+        },
+        {
+          id: data.assistantMessage.id,
+          role: "assistant" as const,
+          content: data.assistantMessage.content,
+          confidenceScore: data.assistantMessage.confidenceScore ?? undefined,
+          createdAt: data.assistantMessage.createdAt,
+          sources: toUiSources(data.sources ?? []),
+        },
+      ]);
+
+      // Update title if it was auto-set
+      if (title === "گفتگوی جدید") {
+        setTitle(content.substring(0, 50) + (content.length > 50 ? "..." : ""));
       }
     } catch (error) {
       console.error("Error sending message:", error);
+      const message =
+        error instanceof ChatRequestError ? `خطا: ${error.message}` : "خطا در اتصال به سرور. لطفاً دوباره تلاش کنید.";
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempAssistantId),
+        { id: `err-${Date.now()}`, role: "assistant", content: message, createdAt: new Date().toISOString() },
+      ]);
     } finally {
       setIsLoading(false);
+      setStreaming(false);
     }
   };
 
@@ -126,7 +165,7 @@ export default function ChatConversationPage({ params }: { params: Promise<{ id:
           <MessageBubble key={msg.id} message={msg} userName={user?.name} />
         ))}
 
-        {isLoading && (
+        {isLoading && !streaming && (
           <div className="flex gap-3 max-w-4xl mx-auto">
             <div className="h-8 w-8 rounded-full bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shrink-0">
               <Bot size={18} className="text-white" />

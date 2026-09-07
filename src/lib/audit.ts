@@ -32,6 +32,7 @@ export type AuditEventCode =
   | "DOCUMENT_PROCESS_COMPLETE"
   | "DOCUMENT_PROCESS_FAIL"
   | "DOCUMENT_REINDEX"
+  | "DOCUMENT_BULK_IMPORT"
   // Knowledge events
   | "KNOWLEDGE_CREATE"
   | "KNOWLEDGE_UPDATE"

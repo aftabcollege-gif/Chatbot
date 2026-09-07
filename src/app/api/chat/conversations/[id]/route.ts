@@ -1,23 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { conversations, messages } from "@/db/schema";
-import { eq, and, asc } from "drizzle-orm";
-import { jwtVerify } from "jose";
+import { eq, and, asc, sql } from "drizzle-orm";
+import { getUserIdFromRequest } from "@/lib/auth-server";
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "change-this-to-random-64-char-string"
-);
+export const dynamic = "force-dynamic";
 
-async function getUserId(request: NextRequest): Promise<string | null> {
-  const token = request.cookies.get("access_token")?.value;
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    return payload.userId as string;
-  } catch {
-    return null;
-  }
-}
+const HISTORY_PAGE_SIZE = 200;
+
+// Session-aware (honours revocation / deactivation) and cached — see auth-server.
+const getUserId = getUserIdFromRequest;
 
 export async function GET(
   request: NextRequest,
@@ -38,11 +30,15 @@ export async function GET(
     return NextResponse.json({ error: "گفتگو یافت نشد" }, { status: 404 });
   }
 
-  const msgs = await db
+  // Newest HISTORY_PAGE_SIZE messages, returned in chronological order.
+  const recent = db
     .select()
     .from(messages)
     .where(eq(messages.conversationId, id))
-    .orderBy(asc(messages.createdAt));
+    .orderBy(sql`${messages.createdAt} DESC`)
+    .limit(HISTORY_PAGE_SIZE)
+    .as("recent");
+  const msgs = await db.select().from(recent).orderBy(asc(recent.createdAt));
 
   return NextResponse.json({
     conversation: {
@@ -56,6 +52,17 @@ export async function GET(
       content: m.content,
       confidenceScore: m.confidenceScore,
       createdAt: m.createdAt?.toISOString(),
+      // Citations are stored with the assistant turn so history can show them
+      // without a second query per message.
+      sources: (m.citations ?? []).map((c, index) => ({
+        id: c.chunkId,
+        type: c.sourceType,
+        title: c.sourceTitle,
+        pageNumber: c.page ?? undefined,
+        section: c.section ?? undefined,
+        relevanceScore: c.relevanceScore,
+        citationIndex: index + 1,
+      })),
     })),
   });
 }
@@ -69,8 +76,11 @@ export async function DELETE(
 
   const { id } = await params;
 
+  // Soft delete: the list endpoint filters on deleted_at, and message history
+  // stays available for audit until a retention job removes it.
   await db
-    .delete(conversations)
+    .update(conversations)
+    .set({ isDeleted: true, deletedAt: new Date(), updatedAt: new Date() })
     .where(and(eq(conversations.id, id), eq(conversations.userId, userId)));
 
   return NextResponse.json({ success: true });

@@ -5,6 +5,7 @@ import { eq, and, isNull } from "drizzle-orm";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent, type AuditEventCode } from "@/lib/audit";
+import { enqueueJob } from "@/lib/jobs/queue";
 
 export const dynamic = "force-dynamic";
 
@@ -95,8 +96,11 @@ export async function PATCH(
     }
     if (status === "ARCHIVED") {
       update.archivedAt = new Date();
-      // Archived knowledge must disappear from retrieval/RAG immediately (directive §32/§48)
-      // Remove any indexed chunks for this knowledge item from retrieval.
+    }
+    if (status !== "PUBLISHED") {
+      // Anything that is not PUBLISHED must disappear from retrieval/RAG
+      // immediately (directive §32/§48). The visibility predicate already
+      // hides it; dropping the chunks also frees index space.
       await db
         .delete(knowledgeChunks)
         .where(and(eq(knowledgeChunks.sourceId, id), eq(knowledgeChunks.sourceType, "knowledge")));
@@ -111,6 +115,12 @@ export async function PATCH(
   }
 
   const [updated] = await db.update(knowledgeItems).set(update).where(eq(knowledgeItems.id, id)).returning();
+
+  if (status === "PUBLISHED" && updated) {
+    // Chunk + embed on the background worker so publishing stays instant
+    // even when the local embedding model is slow.
+    await enqueueJob(updated.organizationId, "knowledge_ingest", updated.id, { title: updated.title });
+  }
 
   if (status) {
     const transition = TRANSITIONS[status];
@@ -148,7 +158,7 @@ export async function DELETE(
   }
 
   // Soft delete + immediate retrieval removal
-  await db.update(knowledgeItems).set({ deletedAt: new Date() }).where(eq(knowledgeItems.id, id));
+  await db.update(knowledgeItems).set({ isDeleted: true, deletedAt: new Date() }).where(eq(knowledgeItems.id, id));
   await db
     .delete(knowledgeChunks)
     .where(and(eq(knowledgeChunks.sourceId, id), eq(knowledgeChunks.sourceType, "knowledge")));

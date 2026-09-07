@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq, and, isNull, desc } from "drizzle-orm";
+import { eq, and, isNull, desc, count, getTableColumns as getTableColumnsOf } from "drizzle-orm";
 import { db } from "@/db";
 import { experiences, experienceTags } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
-import { getEmbedding } from "@/lib/ai/orchestrator";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -38,22 +37,31 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const url = new URL(request.url);
   const statusFilter = url.searchParams.get("status");
+  const limitParam = parseInt(url.searchParams.get("limit") ?? "100", 10);
+  const limit = Math.min(Math.max(Number.isFinite(limitParam) ? limitParam : 100, 1), 200);
+  const offsetParam = parseInt(url.searchParams.get("offset") ?? "0", 10);
+  const offset = Math.max(Number.isFinite(offsetParam) ? offsetParam : 0, 0);
 
-  const query = db
-    .select()
-    .from(experiences)
-    .where(
-      and(
-        eq(experiences.organizationId, user.organizationId),
-        isNull(experiences.deletedAt),
-        ...(statusFilter ? [eq(experiences.status, statusFilter)] : [])
-      )
-    )
-    .orderBy(desc(experiences.createdAt))
-    .limit(100);
+  const where = and(
+    eq(experiences.organizationId, user.organizationId),
+    isNull(experiences.deletedAt),
+    ...(statusFilter ? [eq(experiences.status, statusFilter)] : []),
+  );
 
-  const results = await query;
-  return NextResponse.json(results);
+  // Explicit column list: the legacy jsonb `embedding` column must never be
+  // shipped to the client (it is large and unused since chunks moved to
+  // knowledge_chunks).
+  const { embedding: _embedding, ...listColumns } = getTableColumnsOf(experiences);
+  void _embedding;
+  const [results, [{ total }]] = await Promise.all([
+    db.select(listColumns).from(experiences).where(where).orderBy(desc(experiences.createdAt)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(experiences).where(where),
+  ]);
+
+  const response = NextResponse.json(results);
+  response.headers.set("X-Total-Count", String(total));
+  response.headers.set("X-Has-More", String(offset + results.length < Number(total)));
+  return response;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -83,23 +91,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const data = parsed.data;
 
-  // Create embedding for the experience content
-  const fullText = [
-    data.title,
-    data.problemDescription,
-    data.lessonsLearned,
-    data.actionsTaken,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  let embedding: number[] | undefined;
-  try {
-    embedding = await getEmbedding(fullText);
-  } catch {
-    // Non-fatal — experience saved without embedding, will be indexed later
-  }
-
+  // No embedding here: a DRAFT experience is not retrievable. It is chunked
+  // and embedded by the background worker when it is PUBLISHED
+  // (src/lib/experiences/pipeline.ts), keeping this request O(1).
   const [experience] = await db
     .insert(experiences)
     .values({
@@ -118,7 +112,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       relatedProcess: data.relatedProcess,
       importance: data.importance,
       visibility: data.visibility,
-      embedding,
       status: "DRAFT",
     })
     .returning();

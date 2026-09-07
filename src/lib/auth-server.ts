@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { SignJWT, jwtVerify } from "jose";
-import { eq, and, gt, isNull } from "drizzle-orm";
+import { eq, and, gt, inArray } from "drizzle-orm";
 import { db } from "@/db";
 import {
   users,
@@ -12,6 +12,12 @@ import {
   auditLogs,
 } from "@/db/schema";
 import { createHash } from "crypto";
+import {
+  getCachedUser,
+  setCachedUser,
+  invalidateSessionCache,
+  invalidateUserCache,
+} from "@/lib/auth-cache";
 
 // ============================================================
 // JWT Configuration — FAIL FAST if secret not set
@@ -90,15 +96,17 @@ export async function revokeSession(token: string): Promise<void> {
   const tokenHash = hashToken(token);
   await db
     .update(sessions)
-    .set({ isRevoked: true })
+    .set({ isRevoked: true, revokedAt: new Date() })
     .where(eq(sessions.tokenHash, tokenHash));
+  invalidateSessionCache(tokenHash);
 }
 
 export async function revokeAllUserSessions(userId: string): Promise<void> {
   await db
     .update(sessions)
-    .set({ isRevoked: true })
+    .set({ isRevoked: true, revokedAt: new Date() })
     .where(eq(sessions.userId, userId));
+  invalidateUserCache(userId);
 }
 
 // ============================================================
@@ -117,62 +125,82 @@ export interface CurrentUser {
   isAdmin: boolean;
 }
 
-export async function getUserIdFromRequest(request: NextRequest): Promise<string | null> {
+/**
+ * Roles and the union of their permissions for a set of users — ONE query
+ * for the roles and ONE for the permissions, regardless of how many roles a
+ * user holds (the previous implementation issued one query per role).
+ */
+export async function loadRolesAndPermissions(
+  userId: string,
+): Promise<{ roleNames: string[]; permissions: Set<string> }> {
+  const userRolesList = await db
+    .select({ id: roles.id, name: roles.name })
+    .from(userRoles)
+    .innerJoin(roles, eq(userRoles.roleId, roles.id))
+    .where(eq(userRoles.userId, userId));
+
+  const roleNames = userRolesList.map((r) => r.name);
+  const roleIds = userRolesList.map((r) => r.id);
+  const perms = new Set<string>();
+
+  if (roleIds.length > 0) {
+    const rows = await db
+      .selectDistinct({ code: permissions.code })
+      .from(rolePermissions)
+      .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
+      .where(inArray(rolePermissions.roleId, roleIds));
+    for (const row of rows) perms.add(row.code);
+  }
+
+  return { roleNames, permissions: perms };
+}
+
+/**
+ * Resolve the caller from the `access_token` cookie.
+ *
+ * Fast path: a cached, still-fresh resolution for this exact token (see
+ * auth-cache.ts). Slow path: JWT verification, then a single session⋈user
+ * query, then roles + permissions (two queries). Results are cached for a few
+ * seconds; revocation, logout and user/role edits drop the cache entry.
+ */
+export async function getCurrentUser(request: NextRequest): Promise<CurrentUser | null> {
   const token = request.cookies.get("access_token")?.value;
   if (!token) return null;
+
+  const tokenHash = hashToken(token);
+  const cached = getCachedUser(tokenHash);
+  if (cached) return cached;
 
   const payload = await verifyToken(token);
   if (!payload?.userId) return null;
 
-  // Validate session is not revoked
-  const isValid = await validateSession(token);
-  if (!isValid) return null;
-
-  return payload.userId as string;
-}
-
-export async function getCurrentUser(request: NextRequest): Promise<CurrentUser | null> {
-  const userId = await getUserIdFromRequest(request);
-  if (!userId) return null;
-
-  const [user] = await db
-    .select()
-    .from(users)
-    .where(and(eq(users.id, userId), eq(users.isActive, true)))
+  const now = new Date();
+  const [row] = await db
+    .select({ user: users })
+    .from(sessions)
+    .innerJoin(users, eq(sessions.userId, users.id))
+    .where(
+      and(
+        eq(sessions.tokenHash, tokenHash),
+        eq(sessions.isRevoked, false),
+        gt(sessions.expiresAt, now),
+        eq(users.id, payload.userId as string),
+        eq(users.isActive, true),
+      ),
+    )
     .limit(1);
 
-  if (!user) return null;
+  if (!row) return null;
+  const user = row.user;
 
   // Check account lockout
-  if (user.lockedUntil && user.lockedUntil > new Date()) {
+  if (user.lockedUntil && user.lockedUntil > now) {
     return null;
   }
 
-  // Fetch roles
-  const userRolesList = await db
-    .select({ role: roles })
-    .from(userRoles)
-    .innerJoin(roles, eq(userRoles.roleId, roles.id))
-    .where(eq(userRoles.userId, user.id));
+  const { roleNames, permissions: userPermissions } = await loadRolesAndPermissions(user.id);
 
-  const roleNames = userRolesList.map((r) => r.role.name);
-
-  // Fetch permissions for all roles
-  const roleIds = userRolesList.map((r) => r.role.id);
-  const userPermissions = new Set<string>();
-
-  if (roleIds.length > 0) {
-    for (const roleId of roleIds) {
-      const rolePerms = await db
-        .select({ code: permissions.code })
-        .from(rolePermissions)
-        .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
-        .where(eq(rolePermissions.roleId, roleId));
-      rolePerms.forEach((p) => userPermissions.add(p.code));
-    }
-  }
-
-  return {
+  const current: CurrentUser = {
     id: user.id,
     organizationId: user.organizationId,
     departmentId: user.departmentId,
@@ -184,6 +212,14 @@ export async function getCurrentUser(request: NextRequest): Promise<CurrentUser 
     permissions: userPermissions,
     isAdmin: !!user.isSuperadmin || roleNames.includes("SUPER_ADMIN") || roleNames.includes("ORG_ADMIN"),
   };
+  setCachedUser(tokenHash, current);
+  return current;
+}
+
+/** Id of the authenticated caller, or null. */
+export async function getUserIdFromRequest(request: NextRequest): Promise<string | null> {
+  const user = await getCurrentUser(request);
+  return user?.id ?? null;
 }
 
 /** Check if user has a specific permission — DENY BY DEFAULT */

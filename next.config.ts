@@ -13,6 +13,9 @@ const nextConfig: NextConfig = {
     // PGlite loads its WASM binary from its package at runtime. Bundling it
     // with Turbopack changes the loader and causes instantiateWasm failures.
     "@electric-sql/pglite",
+    // pgvector for PGlite ships its extension as a tarball resolved relative
+    // to the package file at runtime — it must stay external as well.
+    "@electric-sql/pglite-pgvector",
   ],
 };
 

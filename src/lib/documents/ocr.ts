@@ -105,14 +105,13 @@ export async function terminateOcrWorker(): Promise<void> {
 
 export async function ocrHealthCheck(): Promise<{ available: boolean; detail?: string }> {
   try {
-    const exists = await fs
-      .access(path.join(TESSDATA_PATH, "eng.traineddata.gz"))
-      .then(() => true)
-      .catch(() => false);
-    const fasExists = await fs
-      .access(path.join(TESSDATA_PATH, "fas.traineddata.gz"))
-      .then(() => true)
-      .catch(() => false);
+    const hasLang = async (lang: string) => {
+      for (const name of [`${lang}.traineddata.gz`, `${lang}.traineddata`]) {
+        if (await fs.access(path.join(TESSDATA_PATH, name)).then(() => true).catch(() => false)) return true;
+      }
+      return false;
+    };
+    const [exists, fasExists] = await Promise.all([hasLang("eng"), hasLang("fas")]);
     if (!exists || !fasExists) {
       return { available: false, detail: "Persian/English trained data not installed locally." };
     }

@@ -37,6 +37,12 @@ export async function saveBufferSecurely(
 }
 
 export function absoluteStoragePath(storagePath: string): string {
+  // Bulk imports in "link" mode reference the original file in place
+  // (outside STORAGE_DIR) using an explicit absolute-path marker. These paths
+  // are produced only by the trusted importer, never from user input.
+  if (storagePath.startsWith("abs:")) {
+    return path.normalize(storagePath.slice(4));
+  }
   const absolute = path.join(config.storageDir, storagePath);
   const normalized = path.normalize(absolute);
   if (!normalized.startsWith(path.normalize(config.storageDir))) {
@@ -46,6 +52,8 @@ export function absoluteStoragePath(storagePath: string): string {
 }
 
 export async function deleteStoredFile(storagePath: string): Promise<void> {
+  // Never delete files we only reference (link-mode bulk imports).
+  if (storagePath.startsWith("abs:")) return;
   try {
     await fs.unlink(absoluteStoragePath(storagePath));
   } catch {

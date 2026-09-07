@@ -91,7 +91,18 @@ async function getLlamaModule(): Promise<LlamaModule> {
 async function getLlamaInstance(): Promise<LlamaInstance> {
   if (state.llama) return state.llama;
   const mod = await getLlamaModule();
-  state.llama = await mod.getLlama();
+  // Offline-first: only the prebuilt binaries shipped inside node_modules
+  // (@node-llama-cpp/<platform>) may be used. Never clone llama.cpp, never
+  // download a release and never attempt a CMake build on the user's machine —
+  // that would need internet access, build tools and minutes of CPU time.
+  // GPU: LOCAL_LLM_GPU_LAYERS=0 (the portable default) forces the CPU build so
+  // machines without CUDA/Vulkan drivers never pay for a failed GPU probe.
+  state.llama = await mod.getLlama({
+    build: "never",
+    skipDownload: true,
+    gpu: config.localLlm.gpuLayers > 0 ? "auto" : false,
+    logLevel: mod.LlamaLogLevel.warn,
+  });
   return state.llama;
 }
 
@@ -136,8 +147,19 @@ export async function getEmbeddingContext(): Promise<LlamaEmbeddingContext> {
   try {
     assertModelFileExists(config.localEmbedding.modelPath, "Embedding");
     const llama = await getLlamaInstance();
-    const model = await llama.loadModel({ modelPath: config.localEmbedding.modelPath });
-    const embeddingContext = await model.createEmbeddingContext();
+    const model = await llama.loadModel({
+      modelPath: config.localEmbedding.modelPath,
+      gpuLayers: config.localLlm.gpuLayers > 0 ? "max" : 0,
+    });
+    // Chunks are ≤ ~800 chars (≈ 400 tokens); a small context keeps the
+    // per-model memory footprint low so the LLM and embedder fit side by side
+    // on an 8 GB machine. batchSize == contextSize lets a whole chunk be
+    // evaluated in one pass.
+    const embeddingContext = await model.createEmbeddingContext({
+      contextSize: config.localEmbedding.contextSize,
+      batchSize: config.localEmbedding.contextSize,
+      threads: config.localEmbedding.threads,
+    });
     state.embeddingModel = model;
     state.embeddingContext = embeddingContext;
     return embeddingContext;

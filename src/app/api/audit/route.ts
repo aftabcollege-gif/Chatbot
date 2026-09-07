@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq, and, desc, gte } from "drizzle-orm";
+import { eq, and, desc, gte, count } from "drizzle-orm";
 import { db } from "@/db";
 import { auditLogs } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
@@ -15,19 +15,29 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const url = new URL(request.url);
-  const limitParam = parseInt(url.searchParams.get("limit") ?? "50");
-  const limit = Math.min(limitParam, 200);
+  const limitParam = parseInt(url.searchParams.get("limit") ?? "50", 10);
+  const limit = Math.min(Math.max(Number.isFinite(limitParam) ? limitParam : 50, 1), 200);
+  const offsetParam = parseInt(url.searchParams.get("offset") ?? "0", 10);
+  const offset = Math.max(Number.isFinite(offsetParam) ? offsetParam : 0, 0);
+  const sinceParam = url.searchParams.get("since");
+  const since = sinceParam ? new Date(sinceParam) : null;
 
-  const logs = await db
-    .select()
-    .from(auditLogs)
-    .where(
-      user.organizationId
-        ? eq(auditLogs.organizationId, user.organizationId)
-        : undefined
-    )
-    .orderBy(desc(auditLogs.createdAt))
-    .limit(limit);
+  const conditions = [
+    user.organizationId ? eq(auditLogs.organizationId, user.organizationId) : undefined,
+    since && !Number.isNaN(since.getTime()) ? gte(auditLogs.createdAt, since) : undefined,
+  ].filter((c): c is NonNullable<typeof c> => Boolean(c));
+  const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-  return NextResponse.json(logs);
+  // Page + total in parallel; both are index-backed (audit_logs_org_created_idx).
+  const [logs, [{ total }]] = await Promise.all([
+    db.select().from(auditLogs).where(where).orderBy(desc(auditLogs.createdAt)).limit(limit).offset(offset),
+    db.select({ total: count() }).from(auditLogs).where(where),
+  ]);
+
+  // Response stays a plain array for the existing admin pages; paging
+  // metadata travels in headers.
+  const response = NextResponse.json(logs);
+  response.headers.set("X-Total-Count", String(total));
+  response.headers.set("X-Has-More", String(offset + logs.length < Number(total)));
+  return response;
 }

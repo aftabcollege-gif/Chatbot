@@ -10,6 +10,7 @@ import {
   vector,
   index,
   uniqueIndex,
+  primaryKey,
   customType,
   real,
 } from "drizzle-orm/pg-core";
@@ -233,12 +234,15 @@ export const documentVersions = pgTable(
 // Experiences (organizational lessons-learned knowledge)
 // ---------------------------------------------------------------------------
 
+// Workflow states as written by the API and rendered by the UI (upper-case).
 export const experienceStatusEnum = [
-  "draft",
-  "pending_approval",
-  "approved",
-  "published",
-  "rejected",
+  "DRAFT",
+  "SUBMITTED",
+  "UNDER_REVIEW",
+  "CHANGES_REQUESTED",
+  "APPROVED",
+  "PUBLISHED",
+  "ARCHIVED",
 ] as const;
 export type ExperienceStatus = (typeof experienceStatusEnum)[number];
 
@@ -267,7 +271,7 @@ export const experiences = pgTable(
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
     embedding: jsonb("embedding").$type<number[]>(),
     version: integer("version").notNull().default(1),
-    status: varchar("status", { length: 20 }).notNull().default("draft"),
+    status: varchar("status", { length: 20 }).notNull().default("DRAFT"),
     submittedBy: uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
     submittedAt: timestamp("submitted_at", { withTimezone: true }),
     reviewedBy: uuid("reviewed_by").references(() => users.id, { onDelete: "set null" }),
@@ -382,7 +386,7 @@ export const knowledgeChunks = pgTable(
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    sourceType: varchar("source_type", { length: 20 }).notNull(), // 'document' | 'experience'
+    sourceType: varchar("source_type", { length: 20 }).notNull().$type<RagSourceType>(), // see RAG_SOURCE_TYPES
     sourceId: uuid("source_id").notNull(),
     sourceVersion: integer("source_version").notNull().default(1),
     sourceTitle: varchar("source_title", { length: 500 }).notNull(),
@@ -392,19 +396,21 @@ export const knowledgeChunks = pgTable(
     content: text("content").notNull(),
     tokenCount: integer("token_count").notNull().default(0),
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
+    // Keyword index is built over Persian-normalised text (see
+    // src/lib/text/persian.ts) so ي/ی, ك/ک, digits and ZWNJ variants match.
     contentTsv: tsVector("content_tsv").generatedAlwaysAs(
-      (): SQL => sql`to_tsvector('simple', ${knowledgeChunks.content})`,
+      (): SQL => sql`to_tsvector('simple', fa_normalize(${knowledgeChunks.content}))`,
     ),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("knowledge_chunks_org_idx").on(t.organizationId),
     index("knowledge_chunks_source_idx").on(t.sourceType, t.sourceId),
+    index("knowledge_chunks_org_source_idx").on(t.organizationId, t.sourceType, t.sourceId),
     index("knowledge_chunks_tsv_idx").using("gin", t.contentTsv),
-    index("knowledge_chunks_embedding_hnsw_idx").using(
-      "hnsw",
-      t.embedding.op("vector_cosine_ops"),
-    ),
+    index("knowledge_chunks_embedding_hnsw_idx")
+      .using("hnsw", t.embedding.op("vector_cosine_ops"))
+      .with({ m: 16, ef_construction: 64 }),
   ],
 );
 
@@ -428,7 +434,7 @@ export const processingJobs = pgTable(
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    type: varchar("type", { length: 40 }).notNull(), // 'document_ingest' | 'experience_ingest'
+    type: varchar("type", { length: 40 }).notNull(), // 'document_ingest' | 'experience_ingest' | 'knowledge_ingest'
     resourceId: uuid("resource_id").notNull(),
     status: varchar("status", { length: 20 }).notNull().default("PENDING"),
     progress: integer("progress").notNull().default(0),
@@ -516,8 +522,16 @@ export const messageSources = pgTable(
   (t) => [index("message_sources_message_idx").on(t.messageId)],
 );
 
+/**
+ * Every kind of content that can be chunked into `knowledge_chunks` and
+ * therefore cited by the assistant: uploaded documents, published employee
+ * experiences and published knowledge-base items.
+ */
+export const RAG_SOURCE_TYPES = ["document", "experience", "knowledge"] as const;
+export type RagSourceType = (typeof RAG_SOURCE_TYPES)[number];
+
 export type CitationRecord = {
-  sourceType: "document" | "experience";
+  sourceType: RagSourceType;
   sourceId: string;
   sourceTitle: string;
   page?: number | null;
@@ -611,9 +625,24 @@ export const setupStatus = pgTable("setup_status", {
 });
 
 // ---------------------------------------------------------------------------
-// Rate limiting store (per-key sliding window, DB backed)
+// Rate limiting store (fixed window, one row per key/window — DB backed so it
+// is shared by every server process and survives restarts)
 // ---------------------------------------------------------------------------
 
+export const rateLimitBuckets = pgTable(
+  "rate_limit_buckets",
+  {
+    bucketKey: varchar("bucket_key", { length: 250 }).notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.bucketKey, t.windowStart] })],
+);
+
+/**
+ * @deprecated Legacy per-attempt table kept only so existing databases keep
+ * migrating cleanly; new code uses `rateLimitBuckets`.
+ */
 export const rateLimitAttempts = pgTable(
   "rate_limit_attempts",
   {

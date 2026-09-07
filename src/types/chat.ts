@@ -1,6 +1,6 @@
 export interface Source {
   id: string;
-  type: "document" | "web" | "knowledge";
+  type: "document" | "web" | "knowledge" | "experience";
   title: string;
   pageNumber?: number;
   section?: string;
@@ -22,6 +22,7 @@ export interface Message {
 export const SOURCE_TYPE_LABELS: Record<Source["type"], string> = {
   document: "سند",
   knowledge: "دانش سازمانی",
+  experience: "تجربه کارکنان",
   web: "وب",
 };
 

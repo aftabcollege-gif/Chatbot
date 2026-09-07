@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq, and, isNull, desc } from "drizzle-orm";
+import { eq, and, isNull, desc, count } from "drizzle-orm";
 import { db } from "@/db";
 import { knowledgeItems, knowledgeTags } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
-import { getEmbedding } from "@/lib/ai/orchestrator";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -29,19 +28,49 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "کاربر به سازمانی تعلق ندارد" }, { status: 400 });
   }
 
-  const items = await db
-    .select()
-    .from(knowledgeItems)
-    .where(
-      and(
-        eq(knowledgeItems.organizationId, user.organizationId),
-        isNull(knowledgeItems.deletedAt)
-      )
-    )
-    .orderBy(desc(knowledgeItems.createdAt))
-    .limit(100);
+  const url = new URL(request.url);
+  const limitParam = parseInt(url.searchParams.get("limit") ?? "100", 10);
+  const limit = Math.min(Math.max(Number.isFinite(limitParam) ? limitParam : 100, 1), 200);
+  const offsetParam = parseInt(url.searchParams.get("offset") ?? "0", 10);
+  const offset = Math.max(Number.isFinite(offsetParam) ? offsetParam : 0, 0);
+  const statusFilter = url.searchParams.get("status");
 
-  return NextResponse.json(items);
+  const where = and(
+    eq(knowledgeItems.organizationId, user.organizationId),
+    isNull(knowledgeItems.deletedAt),
+    ...(statusFilter ? [eq(knowledgeItems.status, statusFilter)] : []),
+  );
+
+  // Never select the (legacy, jsonb) embedding column into the list payload.
+  const [items, [{ total }]] = await Promise.all([
+    db
+      .select({
+        id: knowledgeItems.id,
+        organizationId: knowledgeItems.organizationId,
+        departmentId: knowledgeItems.departmentId,
+        ownerId: knowledgeItems.ownerId,
+        title: knowledgeItems.title,
+        subject: knowledgeItems.subject,
+        content: knowledgeItems.content,
+        summary: knowledgeItems.summary,
+        visibility: knowledgeItems.visibility,
+        status: knowledgeItems.status,
+        publishedAt: knowledgeItems.publishedAt,
+        createdAt: knowledgeItems.createdAt,
+        updatedAt: knowledgeItems.updatedAt,
+      })
+      .from(knowledgeItems)
+      .where(where)
+      .orderBy(desc(knowledgeItems.createdAt))
+      .limit(limit)
+      .offset(offset),
+    db.select({ total: count() }).from(knowledgeItems).where(where),
+  ]);
+
+  const response = NextResponse.json(items);
+  response.headers.set("X-Total-Count", String(total));
+  response.headers.set("X-Has-More", String(offset + items.length < Number(total)));
+  return response;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -71,14 +100,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const data = parsed.data;
 
-  // Compute embedding
-  let embedding: number[] | undefined;
-  try {
-    embedding = await getEmbedding(data.content);
-  } catch {
-    // Non-fatal
-  }
-
+  // No embedding is computed here: a DRAFT item is not retrievable, and the
+  // item is chunked + embedded by the background worker when it is PUBLISHED
+  // (see src/lib/knowledge/pipeline.ts). Keeps this request O(1).
   const [item] = await db
     .insert(knowledgeItems)
     .values({
@@ -90,7 +114,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       content: data.content,
       summary: data.summary,
       visibility: data.visibility,
-      embedding,
       status: "DRAFT",
     })
     .returning();

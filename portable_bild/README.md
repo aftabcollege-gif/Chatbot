@@ -1,47 +1,79 @@
-# بستهٔ قابل‌حمل آفلاین — Windows x64
+# نسخهٔ قابل‌حمل / نصبی آفلاین — Windows x64
 
-این پوشه، منبع ساخت نسخهٔ قابل‌حمل است. خروجی نهایی یک فایل ZIP با نام
-`Chatbot-Portable-Windows-x64.zip` در **GitHub Release** است. ZIP را کامل روی
-فلش یا هر رایانهٔ Windows 10/11 x64 منتقل و extract کنید؛ سپس فقط
-`portable_bild\Start-Portable.bat` را اجرا کنید.
+این پوشه «راه‌انداز» نسخهٔ قابل‌حمل است و عیناً داخل `Setup.exe` قرار می‌گیرد.
+خروجی نهایی (`Chatbot-Organizational-Offline-Setup.exe`) توسط workflow
+`portable-installer.yml` (پس از فعال‌سازی طبق `portable_setup/README.md`) ساخته و در
+**GitHub Release** منتشر می‌شود؛ روش ساخت دستی در [`../portable_setup/README.md`](../portable_setup/README.md)
+توضیح داده شده است.
 
-## بدون نیاز به نصب
+## چه چیزی داخل بسته است؟
 
-خروجی Release شامل همهٔ این موارد است:
+| مسیر | محتوا |
+| --- | --- |
+| `portable_bild\runtime\node.exe` | Node.js 22 قابل‌حمل — نصب Node لازم نیست |
+| `.next\`, `node_modules\`, `drizzle\` | build تولیدی Next.js + وابستگی‌های Windows x64 + مهاجرت‌های پایگاه‌داده |
+| `models\llm\model.gguf` | مدل زبانی محلی Qwen2.5‑1.5B (Q4_K_M) |
+| `models\embeddings\model.gguf` | مدل embedding چندزبانهٔ bge‑m3 (۱۰۲۴ بعد) |
+| `models\ocr\*.traineddata` | OCR فارسی/انگلیسی Tesseract (کاملاً محلی) |
+| `portable_bild\poppler\bin\` | `pdftoppm.exe` برای PDF اسکن‌شده |
+| `storage\database\` | PGlite (PostgreSQL مبتنی بر WASM) + pgvector — در اولین اجرا ساخته می‌شود |
+| `storage\documents\` | فایل‌های بارگذاری‌شده |
 
-- `runtime\node.exe` — Node.js قابل‌حمل؛ نصب Node.js لازم نیست.
-- `.next` و `node_modules` ساخته‌شده روی Windows x64 — نصب npm لازم نیست.
-- `models\llm\model.gguf` — مدل زبانی محلی Qwen؛ دانلود مدل لازم نیست.
-- OCR فارسی و انگلیسی — هیچ سرویس OCR خارجی استفاده نمی‌شود.
-- PGlite در `storage\database` — PostgreSQL محلی مبتنی بر WASM؛ نصب یا اجرای
-  PostgreSQL لازم نیست.
-- همهٔ داده‌ها، اسناد و پایگاه داده در همان پوشهٔ `storage` نگهداری می‌شوند.
+هیچ اتصال اینترنتی، PostgreSQL، Python یا سرویس خارجی لازم نیست
+(`AI_MODE=offline` + کیل‌سوییچ شبکه).
 
-در اولین اجرا، فایل `.env` با کلیدهای تصادفی محلی ایجاد می‌شود. `AI_MODE=offline`
-است و هیچ کلید API یا اتصال اینترنتی برای کارکرد برنامه وجود ندارد.
+## اجرا
 
-> برای انتقال اطلاعات به رایانهٔ دیگر، در حالی که برنامه بسته است کل پوشهٔ
-> `Chatbot-Portable` را کپی کنید؛ پوشهٔ `storage` را حذف نکنید.
+`Start-Portable.bat` (میانبر Start Menu / Desktop) این کارها را انجام می‌دهد:
 
-## ساخت و انتشار ZIP در GitHub
+1. **پیش‌پرواز:** وجود `runtime\node.exe`، `.next`، `node_modules`، `drizzle` را بررسی
+   می‌کند و در صورت نقص با پیام روشن متوقف می‌شود.
+2. **`.env`:** اگر وجود نداشته باشد از `.env.template` با کلیدهای تصادفی
+   (`JWT_SECRET`, `JOB_SECRET`) ساخته می‌شود.
+3. **رفع alias PGlite:** `repair-pglite-external.cjs` نام‌های هش‌شدهٔ Turbopack را از
+   `.next` می‌خواند و alias محلی می‌سازد (بدون اینترنت).
+4. **اجرای سرور:** `next start` روی `PORT` (پیش‌فرض ۳۸۰۰) و `PORTABLE_HOSTNAME`
+   (پیش‌فرض `127.0.0.1`)، با `pdftoppm` در PATH و
+   `NODE_LLAMA_CPP_SKIP_DOWNLOAD=true` (هرگز چیزی دانلود/کامپایل نمی‌شود).
+5. مهاجرت‌های پایگاه‌داده خودکار اعمال می‌شوند؛ تا پایان آن‌ها `/api/health` کد ۵۰۳
+   می‌دهد. سپس مرورگر روی `http://localhost:3800` باز می‌شود.
 
-به تب **Actions** مخزن بروید، workflow با نام **Build portable Windows package**
-را انتخاب کنید و **Run workflow** را اجرا نمایید. یک tag مانند
-`portable-v1.0.0` وارد کنید. workflow به‌صورت خودکار روی Windows:
+ورود اول: `admin` / `ChangeMe123!` (بلافاصله عوض شود).
 
-1. dependencyهای Windows را نصب می‌کند؛
-2. مدل زبانی و OCR را دریافت می‌کند؛
-3. برنامه را build می‌کند؛
-4. Node.js قابل‌حمل را اضافه می‌کند؛
-5. ZIP کامل را در GitHub Release همان tag بارگذاری می‌کند.
+## تنظیمات مهم `.env`
 
-مدل‌ها و باینری‌ها عمداً در Git source قرار ندارند: محدودیت GitHub برای هر فایل
-Git حدود ۱۰۰MB است، درحالی‌که مدل زبانی صدها مگابایت حجم دارد. اما فایل Release
-خروجی کامل و قابل‌انتقال است و پس از دریافت، کاملاً آفلاین کار می‌کند.
+| کلید | پیش‌فرض | توضیح |
+| --- | --- | --- |
+| `PORT` | `3800` | پورت وب |
+| `PORTABLE_HOSTNAME` | `127.0.0.1` | برای دسترسی سایر رایانه‌های شبکه: `0.0.0.0` (+ باز کردن پورت در فایروال) |
+| `PORTABLE_DATABASE_DIR` | `./storage/database` | مسیر پایگاه‌داده |
+| `STORAGE_DIR` | `./storage` | مسیر فایل‌ها |
+| `INGEST_CONCURRENCY` | `2` | تعداد پردازش هم‌زمان اسناد (با embedding روی CPU ۱–۲) |
+| `LOCAL_LLM_THREADS` | `4` | رشته‌های CPU مدل زبانی |
+| `LOCAL_LLM_GPU_LAYERS` | `0` | فقط با باینری GPU (ساخت با `-Gpu`) |
+| `RAG_TOP_K`, `RAG_MIN_SCORE` | `8`, `0.15` | قابل تغییر از پنل مدیریت هم هست |
 
-## رفع alias PGlite
+## انتقال / پشتیبان‌گیری
 
-`repair-pglite-external.cjs` پیش از شروع Next.js اجرا می‌شود. در بعضی buildهای
-Turbopack، PGlite با نام داخلی هش‌شده صادر می‌شود. اسکریپت نام را از `.next`
-می‌خواند و alias محلی لازم را بدون اینترنت می‌سازد تا خطای
-`ERR_MODULE_NOT_FOUND` رخ ندهد.
+در حالی که برنامه بسته است، پوشهٔ `storage` و فایل `.env` را کپی کنید؛ همین دو
+مورد، همهٔ داده‌ها را دربر می‌گیرند. حذف برنامه (Uninstall) این دو را پاک نمی‌کند و
+نصب نسخهٔ جدید روی نسخهٔ قبلی، آن‌ها را حفظ می‌کند.
+
+## واردکردن انبوه اسناد
+
+پنل مدیریت → تب «پردازش و واردکردن» → مسیر پوشه (مثلاً `D:\Archive`) → شروع.
+فایل‌ها به‌صورت بازگشتی ثبت، با SHA‑256 تکراری‌زدایی و توسط کارگر پس‌زمینه پردازش
+می‌شوند؛ پیشرفت (پیمایش‌شده / واردشده / تکراری / خطا) و سابقهٔ دسته‌ها در همان تب
+دیده می‌شود و می‌توان همان‌جا پیمایش را متوقف کرد. (ابزار خط فرمان
+`npm run import` فقط در checkout توسعه در دسترس است، نه در بستهٔ نصبی.)
+
+## فایل‌های این پوشه
+
+| فایل | نقش |
+| --- | --- |
+| `Start-Portable.bat` | نقطهٔ ورود کاربر (میانبرها به این اشاره می‌کنند) |
+| `start-portable.cjs` | راه‌انداز اصلی (پیش‌پرواز، `.env`، repair، `next start`) |
+| `open-browser.cjs` | صبر برای `/api/health` و باز کردن مرورگر |
+| `repair-pglite-external.cjs` | رفع alias هش‌شدهٔ PGlite/Turbopack (`--check`, `--copy`) |
+| `create-portable-env.cjs` | ساخت `.env` با کلیدهای تصادفی از روی `.env.template` |
+| `.env.template` | قالب تنظیمات نسخهٔ قابل‌حمل |
