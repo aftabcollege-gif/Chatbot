@@ -12,12 +12,17 @@ import { getRelativeTime } from "@/lib/persian-date";
 interface Doc {
   id: string;
   title: string;
-  originalFilename: string;
-  fileType: string;
-  fileSizeBytes: number | null;
+  fileName: string;
+  mimeType: string;
+  fileSize: number | null;
   status: string | null;
-  processingProgress: number | null;
+  errorMessage: string | null;
   createdAt: string;
+}
+
+function extensionOf(fileName: string): string {
+  const idx = fileName.lastIndexOf(".");
+  return idx >= 0 ? fileName.slice(idx + 1).toUpperCase() : "";
 }
 
 export default function ResourcesPage() {
@@ -26,21 +31,28 @@ export default function ResourcesPage() {
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { fetchDocs(); }, []);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const fetchDocs = () => setRefreshTick((t) => t + 1);
 
-  const fetchDocs = async () => {
-    try {
-      const res = await fetch("/api/documents");
-      if (res.ok) {
-        const data = await res.json();
-        setDocs(data.items || []);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      let items: Doc[] = [];
+      try {
+        const res = await fetch("/api/documents?limit=100");
+        if (res.ok) items = ((await res.json()) as { items?: Doc[] }).items ?? [];
+      } catch (error) {
+        console.error("Error:", error);
       }
-    } catch (error) {
-      console.error("Error:", error);
-    } finally {
+      if (cancelled) return;
+      setDocs(items);
       setLoading(false);
-    }
-  };
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshTick]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -79,9 +91,10 @@ export default function ResourcesPage() {
 
   const statusBadge = (status: string | null) => {
     switch (status) {
-      case "READY": return <Badge variant="success">آماده</Badge>;
-      case "PROCESSING": return <Badge variant="warning">در حال پردازش</Badge>;
-      case "ERROR": return <Badge variant="error">خطا</Badge>;
+      case "completed": return <Badge variant="success">آماده</Badge>;
+      case "processing": return <Badge variant="warning">در حال پردازش</Badge>;
+      case "pending": return <Badge variant="secondary">در صف</Badge>;
+      case "failed": return <Badge variant="error">خطا</Badge>;
       default: return <Badge variant="secondary">{status || "نامشخص"}</Badge>;
     }
   };
@@ -121,8 +134,8 @@ export default function ResourcesPage() {
                 <div className="flex-1 min-w-0">
                   <p className="text-white font-medium truncate">{doc.title}</p>
                   <div className="flex items-center gap-3 text-xs text-gray-500 mt-1">
-                    <span>{doc.fileType?.toUpperCase()}</span>
-                    <span>{formatSize(doc.fileSizeBytes)}</span>
+                    <span>{extensionOf(doc.fileName)}</span>
+                    <span>{formatSize(doc.fileSize)}</span>
                     <span className="flex items-center gap-1">
                       <Clock size={10} />
                       {getRelativeTime(doc.createdAt)}

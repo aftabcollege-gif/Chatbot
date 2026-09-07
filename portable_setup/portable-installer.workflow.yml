@@ -1,0 +1,171 @@
+name: Build portable Windows installer
+
+# Produces Chatbot-Organizational-Offline-Setup.exe for the Next.js/PGlite
+# application in this repository root (NOT the Python enterprise-ai-assistant
+# variant, which has its own workflow).
+#
+# Trigger it from the Actions tab ("Run workflow") or by pushing a tag such as
+# `portable-v1.2.0`. The output is attached to a GitHub Release for that tag
+# (or to the rolling `portable-latest` release for manual runs without a tag)
+# and is also kept as a workflow artifact.
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags: ["portable-v*"]
+  workflow_dispatch:
+    inputs:
+      bundle_models:
+        description: "Bundle the LLM + embedding GGUF models (≈1.8 GB; unchecked = lite installer)"
+        type: boolean
+        default: true
+      publish_release:
+        description: "Attach the installer to the GitHub Release `portable-latest`"
+        type: boolean
+        default: true
+      run_browser_tests:
+        description: "Run the end-to-end API/browser test suite before packaging"
+        type: boolean
+        default: true
+
+concurrency:
+  group: portable-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22.12.0"
+  NEXT_TELEMETRY_DISABLED: "1"
+  NODE_LLAMA_CPP_SKIP_DOWNLOAD: "true"
+
+jobs:
+  verify:
+    name: Lint, typecheck, build & test (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Production build
+        env:
+          JWT_SECRET: ci-only-build-secret-not-used-at-runtime-0123456789
+        run: npm run build
+      - name: Stage bundle (Linux) and smoke-test it
+        run: |
+          node portable_setup/stage-bundle.cjs . /tmp/stage --platform linux --arch x64 --skip-models --version ci
+          node portable_setup/smoke-test.cjs /tmp/stage --port 3899
+      - name: API regression suite against the staged bundle
+        if: ${{ github.event_name == 'push' || inputs.run_browser_tests }}
+        run: node portable_setup/api-regression.cjs /tmp/stage --port 3898
+
+  installer:
+    name: Build Windows installer
+    needs: verify
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          if ($ref -like 'portable-v*') { $v = $ref.Substring('portable-v'.Length) }
+          else { $v = "0.0.0-ci." + "${{ github.run_number }}" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Installer version: $v"
+
+      - name: Install dependencies (Windows x64 native packages)
+        run: npm ci --no-audit --no-fund
+
+      # GGUF models are large and immutable → cache by URL so reruns are fast.
+      - name: Restore model cache
+        if: ${{ github.event_name == 'push' || inputs.bundle_models }}
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            models/llm/model.gguf
+            models/embeddings/model.gguf
+            models/ocr/tessdata/*.traineddata.gz
+          key: models-qwen2.5-1.5b-q4km-bge-m3-q8-tessfast-v1
+
+      - name: Download models (LLM, embeddings, OCR)
+        if: ${{ (github.event_name == 'push' || inputs.bundle_models) && steps.model-cache.outputs.cache-hit != 'true' }}
+        run: node scripts/install-model.mjs
+
+      - name: Download OCR data only (lite build)
+        if: ${{ github.event_name != 'push' && !inputs.bundle_models }}
+        run: node scripts/install-model.mjs --ocr
+
+      - name: Production build
+        env:
+          JWT_SECRET: ci-only-build-secret-not-used-at-runtime-0123456789
+        run: npm run build
+
+      - name: Build installer
+        shell: pwsh
+        env:
+          PORTABLE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $extra = @()
+          if ('${{ github.event_name }}' -ne 'push' -and '${{ inputs.bundle_models }}' -ne 'true') { $extra += '-SkipModels' }
+          powershell -ExecutionPolicy Bypass -File .\portable_setup\build-installer.ps1 -NodeVersion $env:NODE_VERSION -Packager inno @extra
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-out | Out-Null
+          Copy-Item portable_setup\Chatbot-Organizational-Offline-Setup*.exe release-out\
+          Copy-Item portable_setup\Chatbot-Organizational-Offline-Setup*.bin release-out\ -ErrorAction SilentlyContinue
+          Copy-Item portable_setup\Chatbot-Organizational-Offline-Setup.exe.sha256 release-out\SHA256SUMS.txt
+          Copy-Item portable_setup\README.md release-out\README-Setup.md
+          Get-ChildItem release-out | Format-Table Name, @{n='MB';e={[math]::Round($_.Length/1MB)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chatbot-Organizational-Offline-Setup-${{ steps.version.outputs.version }}
+          path: release-out
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/portable-v') && github.ref_name || 'portable-latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/portable-v') && format('Chatbot سازمانی آفلاین {0}', steps.version.outputs.version) || 'Chatbot سازمانی آفلاین — آخرین نسخه' }}
+          target_commitish: ${{ github.sha }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/portable-v') }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/portable-v') }}
+          fail_on_unmatched_files: true
+          body: |
+            نصب‌کنندهٔ کامل ویندوز (x64) — بدون نیاز به اینترنت پس از نصب.
+
+            شامل: Node.js قابل‌حمل، build تولیدی، PGlite + pgvector، مدل زبانی Qwen2.5-1.5B (GGUF)،
+            مدل embedding چندزبانهٔ bge-m3، دادهٔ OCR فارسی/انگلیسی و poppler برای PDFهای اسکن‌شده.
+
+            نصب: `Chatbot-Organizational-Offline-Setup.exe` را اجرا کنید (اگر فایل‌های `.bin` هم وجود دارند،
+            باید کنار exe باشند). پس از نصب، میانبر «Chatbot سازمانی آفلاین» برنامه را روی
+            http://localhost:3800 اجرا می‌کند. ورود اولیه: `admin` / `ChangeMe123!` (بلافاصله تغییر دهید).
+
+            صحت فایل: `SHA256SUMS.txt`
+          files: |
+            release-out/*.exe
+            release-out/*.bin
+            release-out/SHA256SUMS.txt
+            release-out/README-Setup.md

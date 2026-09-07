@@ -5,6 +5,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useRouter } from "next/navigation";
 import { timeAgo } from "@/lib/persian-date";
 import { formatFileSize } from "@/lib/utils";
+import { IngestionPanel } from "@/components/admin/ingestion-panel";
 
 interface AuditLog {
   id: string;
@@ -19,12 +20,23 @@ interface AuditLog {
 
 interface HealthStatus {
   ok: boolean;
-  database: string;
-  ai: {
-    llm: { available: boolean; name: string; isLocal: boolean };
-    embedding: { available: boolean; name: string; isLocal: boolean; dimensions: number };
-  } | null;
-  timestamp: string;
+  uptimeSeconds: number;
+  database: { ok: boolean; latencyMs: number; vectorSearch: boolean };
+  models: { llm: boolean; embedding: boolean };
+  ingestion: {
+    workerStarted: boolean;
+    running: number;
+    concurrency: number;
+    queue: { pending: number; processing: number; completed: number; failed: number } | null;
+  };
+  authCache?: { size: number; hits: number; misses: number; ttlMs: number };
+  maintenance?: { lastRunAt: string | null; intervalMinutes: number };
+  memory?: { rssMb: number; heapUsedMb: number };
+}
+
+interface AiStatus {
+  llm: { available: boolean; name: string; isLocal: boolean };
+  embedding: { available: boolean; name: string; isLocal: boolean; dimensions: number };
 }
 
 export default function AdminPage() {
@@ -33,6 +45,8 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const [checkedAt, setCheckedAt] = useState<string | null>(null);
   const [loadingAudit, setLoadingAudit] = useState(false);
 
   useEffect(() => {
@@ -41,38 +55,54 @@ export default function AdminPage() {
     }
   }, [user, router]);
 
+  // Health: process status (public) + live AI provider status (admin-only),
+  // fetched in parallel; refreshed on every tab change and every 30 s.
   useEffect(() => {
-    loadHealth();
-    if (activeTab === "audit") loadAuditLogs();
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [healthRes, systemRes] = await Promise.all([fetch("/api/health"), fetch("/api/admin/system")]);
+        const healthJson = healthRes.ok ? ((await healthRes.json()) as HealthStatus) : null;
+        const systemJson = systemRes.ok ? ((await systemRes.json()) as { ai: AiStatus }) : null;
+        if (cancelled) return;
+        if (healthJson) setHealth(healthJson);
+        if (systemJson) setAi(systemJson.ai);
+        setCheckedAt(new Date().toISOString());
+      } catch {
+        /* transient — next refresh retries */
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [activeTab]);
 
-  const loadHealth = async () => {
-    try {
-      const res = await fetch("/api/health");
-      if (res.ok) setHealth(await res.json() as HealthStatus);
-    } catch { /* ignore */ }
-  };
+  useEffect(() => {
+    if (activeTab !== "audit") return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/audit?limit=50");
+        const logs = res.ok ? ((await res.json()) as AuditLog[]) : [];
+        if (!cancelled) setAuditLogs(logs);
+      } catch {
+        /* ignore */
+      } finally {
+        if (!cancelled) setLoadingAudit(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab]);
 
-  const loadAuditLogs = async () => {
-    setLoadingAudit(true);
-    try {
-      const res = await fetch("/api/audit?limit=50");
-      if (res.ok) setAuditLogs(await res.json() as AuditLog[]);
-    } catch { /* ignore */ }
-    finally { setLoadingAudit(false); }
-  };
-
-  const triggerProcess = async () => {
-    try {
-      const res = await fetch("/api/jobs/process", {
-        method: "POST",
-        headers: { "x-job-secret": "internal-job-secret" },
-      });
-      const data = await res.json() as { processed: boolean };
-      alert(data.processed ? "یک کار پردازش شد" : "صف پردازش خالی است");
-    } catch {
-      alert("خطا در اجرای کار");
-    }
+  const openTab = (id: string) => {
+    if (id === "audit") setLoadingAudit(true);
+    setActiveTab(id);
   };
 
   if (!user?.isAdmin) return null;
@@ -81,7 +111,7 @@ export default function AdminPage() {
     { id: "dashboard", label: "داشبورد" },
     { id: "ai", label: "وضعیت AI" },
     { id: "audit", label: "گزارش حسابرسی" },
-    { id: "jobs", label: "کارهای پردازش" },
+    { id: "jobs", label: "پردازش و واردکردن" },
   ];
 
   return (
@@ -97,7 +127,7 @@ export default function AdminPage() {
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => openTab(tab.id)}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.id
                 ? "border-blue-500 text-blue-400"
@@ -117,48 +147,89 @@ export default function AdminPage() {
               <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
                 <p className="text-slate-400 text-sm mb-1">وضعیت پایگاه داده</p>
                 <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${health?.database === "READY" ? "bg-green-400" : "bg-red-400"}`} />
-                  <span className="text-white font-medium">{health?.database ?? "در حال بررسی..."}</span>
+                  <div className={`w-2 h-2 rounded-full ${health?.database?.ok ? "bg-green-400" : "bg-red-400"}`} />
+                  <span className="text-white font-medium">
+                    {health ? (health.database?.ok ? "آماده" : "خطا") : "در حال بررسی..."}
+                  </span>
+                  {health?.database && (
+                    <span className="text-slate-500 text-xs">
+                      {health.database.latencyMs} ms · {health.database.vectorSearch ? "جستجوی برداری فعال" : "فقط جستجوی کلیدواژه"}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
                 <p className="text-slate-400 text-sm mb-1">مدل LLM</p>
                 <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${health?.ai?.llm.available ? "bg-green-400" : "bg-yellow-400"}`} />
+                  <div className={`w-2 h-2 rounded-full ${ai?.llm.available ? "bg-green-400" : "bg-yellow-400"}`} />
                   <span className="text-white font-medium text-sm">
-                    {health?.ai?.llm.available ? health.ai.llm.name : "آفلاین (Fallback فعال)"}
+                    {ai?.llm.available ? ai.llm.name : "نصب نشده (پاسخ استخراجی از منابع)"}
                   </span>
                 </div>
               </div>
               <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
                 <p className="text-slate-400 text-sm mb-1">مدل Embedding</p>
                 <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${health?.ai?.embedding.available ? "bg-green-400" : "bg-yellow-400"}`} />
+                  <div className={`w-2 h-2 rounded-full ${ai?.embedding.available ? "bg-green-400" : "bg-yellow-400"}`} />
                   <span className="text-white font-medium text-sm">
-                    {health?.ai?.embedding.available ? health.ai.embedding.name : "Local Fallback (Hashing)"}
+                    {ai?.embedding.available ? ai.embedding.name : "نصب نشده (جستجوی کلیدواژه)"}
                   </span>
                 </div>
               </div>
               <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <p className="text-slate-400 text-sm mb-1">صف پردازش اسناد</p>
+                {health?.ingestion?.queue ? (
+                  <div className="text-sm text-white">
+                    <span className="text-amber-300">{health.ingestion.queue.pending} در انتظار</span>
+                    {" · "}
+                    <span className="text-blue-300">{health.ingestion.queue.processing} در حال پردازش</span>
+                    {" · "}
+                    <span className="text-emerald-300">{health.ingestion.queue.completed} تکمیل‌شده</span>
+                    {health.ingestion.queue.failed > 0 && (
+                      <>
+                        {" · "}
+                        <span className="text-red-300">{health.ingestion.queue.failed} ناموفق</span>
+                      </>
+                    )}
+                    <p className="text-slate-500 text-xs mt-1">
+                      کارگر پس‌زمینه: {health.ingestion.workerStarted ? `فعال (${health.ingestion.concurrency} همزمان)` : "غیرفعال"}
+                    </p>
+                  </div>
+                ) : (
+                  <span className="text-slate-500 text-sm">—</span>
+                )}
+              </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <p className="text-slate-400 text-sm mb-1">حافظه و زمان اجرا</p>
+                <span className="text-white font-medium text-sm">
+                  {health?.memory ? `${health.memory.rssMb} MB` : "—"}
+                  {health ? ` · ${Math.floor(health.uptimeSeconds / 3600)} ساعت و ${Math.floor((health.uptimeSeconds % 3600) / 60)} دقیقه` : ""}
+                </span>
+              </div>
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
                 <p className="text-slate-400 text-sm mb-1">آخرین بررسی سلامت</p>
                 <span className="text-white font-medium text-sm">
-                  {health?.timestamp ? timeAgo(health.timestamp) : "—"}
+                  {checkedAt ? timeAgo(checkedAt) : "—"}
                 </span>
+                {health?.maintenance?.lastRunAt && (
+                  <p className="text-slate-500 text-xs mt-1">
+                    نگهداری دوره‌ای: {timeAgo(health.maintenance.lastRunAt)} (هر {health.maintenance.intervalMinutes} دقیقه)
+                  </p>
+                )}
               </div>
             </div>
 
-            {/* Ollama setup guide */}
-            {health && !health.ai?.llm.available && (
+            {/* Local model setup guide */}
+            {ai && !ai.llm.available && (
               <div className="bg-blue-900/20 border border-blue-700 rounded-xl p-5">
-                <h3 className="text-blue-300 font-medium mb-2">راهنمای فعال‌سازی Ollama (LLM محلی)</h3>
+                <h3 className="text-blue-300 font-medium mb-2">راهنمای فعال‌سازی مدل زبانی محلی (آفلاین)</h3>
                 <ol className="text-blue-200 text-sm space-y-1 list-decimal list-inside">
-                  <li>نصب Ollama: <code className="bg-slate-800 px-1 rounded">https://ollama.com</code></li>
-                  <li>دانلود مدل: <code className="bg-slate-800 px-1 rounded">ollama pull qwen2.5:7b</code></li>
-                  <li>دانلود Embedding: <code className="bg-slate-800 px-1 rounded">ollama pull nomic-embed-text</code></li>
-                  <li>Ollama به‌صورت خودکار شناسایی می‌شود (هیچ API Key نیاز نیست)</li>
+                  <li>فایل مدل GGUF را در مسیر <code className="bg-slate-800 px-1 rounded">models/llm/model.gguf</code> قرار دهید (یا <code className="bg-slate-800 px-1 rounded">node scripts/install-model.mjs</code> را روی سیستمی با اینترنت اجرا کنید).</li>
+                  <li>برای جستجوی معنایی، مدل Embedding را در <code className="bg-slate-800 px-1 rounded">models/embeddings/model.gguf</code> قرار دهید و <code className="bg-slate-800 px-1 rounded">LOCAL_EMBEDDING_ENABLED=true</code> کنید.</li>
+                  <li>برنامه را دوباره اجرا کنید؛ مدل‌ها به‌صورت خودکار شناسایی می‌شوند (بدون هیچ API Key).</li>
                 </ol>
                 <p className="text-slate-400 text-xs mt-2">
-                  ⚠️ بدون Ollama، سیستم از جستجوی کلمه‌کلیدی محلی استفاده می‌کند (بدون LLM).
+                  ⚠️ بدون مدل زبانی، پاسخ‌ها مستقیماً از متن منابع استخراج می‌شوند و جستجو کلیدواژه‌ای است.
                   هیچ داده‌ای به Cloud ارسال نمی‌شود.
                 </p>
               </div>
@@ -173,33 +244,33 @@ export default function AdminPage() {
               <div>
                 <p className="text-slate-400 text-xs font-medium mb-2">مدل LLM</p>
                 <div className="flex items-center justify-between">
-                  <span className="text-white text-sm">{health?.ai?.llm.name ?? "نامشخص"}</span>
+                  <span className="text-white text-sm">{ai?.llm.name ?? "نامشخص"}</span>
                   <span className={`text-xs px-2 py-1 rounded-full ${
-                    health?.ai?.llm.available
+                    ai?.llm.available
                       ? "bg-green-900/50 text-green-400"
                       : "bg-yellow-900/50 text-yellow-400"
                   }`}>
-                    {health?.ai?.llm.available ? "آنلاین" : "غیرفعال"}
+                    {ai?.llm.available ? "فعال" : "غیرفعال"}
                   </span>
                 </div>
                 <p className="text-slate-600 text-xs mt-1">
-                  {health?.ai?.llm.isLocal ? "✅ کاملاً محلی (بدون Cloud)" : "⚠️ Cloud"}
+                  {ai?.llm.isLocal ? "✅ کاملاً محلی (بدون Cloud)" : "⚠️ Cloud"}
                 </p>
               </div>
               <hr className="border-slate-700" />
               <div>
                 <p className="text-slate-400 text-xs font-medium mb-2">مدل Embedding</p>
                 <div className="flex items-center justify-between">
-                  <span className="text-white text-sm">{health?.ai?.embedding.name ?? "نامشخص"}</span>
+                  <span className="text-white text-sm">{ai?.embedding.name ?? "نامشخص"}</span>
                   <span className={`text-xs px-2 py-1 rounded-full ${
-                    health?.ai?.embedding.available
+                    ai?.embedding.available
                       ? "bg-green-900/50 text-green-400"
                       : "bg-yellow-900/50 text-yellow-400"
                   }`}>
-                    {health?.ai?.embedding.available ? "آنلاین" : "Local Fallback"}
+                    {ai?.embedding.available ? "فعال" : "Local Fallback"}
                   </span>
                 </div>
-                <p className="text-slate-600 text-xs mt-1">ابعاد: {health?.ai?.embedding.dimensions ?? "—"}</p>
+                <p className="text-slate-600 text-xs mt-1">ابعاد: {ai?.embedding.dimensions ?? "—"}</p>
               </div>
             </div>
 
@@ -256,32 +327,7 @@ export default function AdminPage() {
           </div>
         )}
 
-        {activeTab === "jobs" && (
-          <div className="max-w-2xl mx-auto space-y-4">
-            <h2 className="text-white font-semibold">مدیریت کارهای پردازش</h2>
-            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 space-y-4">
-              <div>
-                <h3 className="text-white text-sm font-medium mb-2">پردازش دستی</h3>
-                <p className="text-slate-400 text-sm mb-3">
-                  اسناد بارگذاری‌شده برای پردازش در صف هستند.
-                  برای پردازش فوری دکمه زیر را کلیک کنید.
-                </p>
-                <button
-                  onClick={triggerProcess}
-                  className="bg-blue-600 hover:bg-blue-500 text-white text-sm px-4 py-2 rounded-lg transition-colors"
-                >
-                  ▶ پردازش کار بعدی
-                </button>
-              </div>
-              <hr className="border-slate-700" />
-              <div>
-                <p className="text-slate-400 text-xs">
-                  ⚠️ در محیط Production، از یک Cron Job هر ۳۰ ثانیه برای پردازش خودکار استفاده کنید.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
+        {activeTab === "jobs" && <IngestionPanel />}
       </div>
     </div>
   );

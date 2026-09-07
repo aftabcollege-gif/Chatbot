@@ -15,8 +15,9 @@
  */
 
 import { getLlmProvider, getEmbeddingProvider } from "@/lib/ai/provider-factory";
-import { localEmbedding } from "@/lib/local-embeddings";
+import { localEmbedding, LOCAL_EMBEDDING_DIMENSIONS } from "@/lib/local-embeddings";
 import type { ChatMessageInput, GenerateOptions } from "@/lib/ai/types";
+import { config } from "@/lib/config";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -27,6 +28,7 @@ export interface ChatOptions {
   temperature?: number;
   maxTokens?: number;
   onToken?: (partial: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface LLMResponse {
@@ -64,6 +66,7 @@ export async function llmChat(
     temperature: options?.temperature,
     maxTokens: options?.maxTokens,
     onToken: options?.onToken,
+    signal: options?.signal,
   };
   const result = await provider.generate(messages as ChatMessageInput[], genOptions);
   return {
@@ -132,9 +135,7 @@ export async function getAIStatus(): Promise<AIProviderStatus> {
       available: embeddingHealth.available,
       name: embeddingHealth.modelName ?? "Lexical hashing fallback",
       isLocal: true,
-      dimensions: embeddingHealth.available
-        ? (embeddingHealth.modelName ? 1024 : 768)
-        : 768,
+      dimensions: embeddingHealth.available ? config.localEmbedding.dimensions : LOCAL_EMBEDDING_DIMENSIONS,
     },
   };
 }

@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { roles, rolePermissions, permissions } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth-server";
+import { invalidateAllUserCache } from "@/lib/auth-cache";
 import { logEvent } from "@/lib/audit";
 
 export async function PATCH(
@@ -34,6 +35,8 @@ export async function PATCH(
         await db.insert(rolePermissions).values(rows.map((p) => ({ roleId: id, permissionId: p.id })));
       }
     }
+    // Permission sets are cached per session for a few seconds — flush them.
+    invalidateAllUserCache();
   }
 
   await logEvent({ eventCode: "ROLE_UPDATE", actorId: current.id, resourceType: "role", resourceId: id, resourceName: role.name, request });
@@ -55,6 +58,7 @@ export async function DELETE(
   if (role.isSystem) return NextResponse.json({ error: "نقش‌های سیستمی قابل حذف نیستند" }, { status: 400 });
 
   await db.delete(roles).where(eq(roles.id, id));
+  invalidateAllUserCache();
 
   await logEvent({ eventCode: "ROLE_DELETE", actorId: current.id, resourceType: "role", resourceId: id, request });
 

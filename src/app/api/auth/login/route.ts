@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { users, roles, userRoles, permissions, rolePermissions } from "@/db/schema";
-import { signToken, createSession } from "@/lib/auth-server";
+import { users } from "@/db/schema";
+import { signToken, createSession, loadRolesAndPermissions } from "@/lib/auth-server";
 import { logEvent } from "@/lib/audit";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, rateLimitKeyFromRequest, retryAfterSeconds } from "@/lib/rate-limit";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 
@@ -16,19 +16,16 @@ const LoginSchema = z.object({
 });
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const ip =
-    request.headers.get("x-forwarded-for")?.split(",")[0].trim() ??
-    request.headers.get("x-real-ip") ??
-    "unknown";
+  const ip = rateLimitKeyFromRequest(request);
 
-  // Rate limiting
+  // Rate limiting (one atomic upsert)
   const rateCheck = await checkRateLimit(ip, "login", ip);
   if (!rateCheck.allowed) {
     return NextResponse.json(
       { error: "تعداد تلاش‌های ورود بیش از حد مجاز است. لطفاً بعداً تلاش کنید." },
       {
         status: 429,
-        headers: { "Retry-After": "900" },
+        headers: { "Retry-After": String(retryAfterSeconds("login", rateCheck)) },
       }
     );
   }
@@ -138,29 +135,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .set({ failedLoginAttempts: 0, lockedUntil: null, lastLogin: new Date() })
     .where(eq(users.id, user.id));
 
-  // Fetch roles & permissions
-  const userRolesList = await db
-    .select({ role: roles })
-    .from(userRoles)
-    .innerJoin(roles, eq(userRoles.roleId, roles.id))
-    .where(eq(userRoles.userId, user.id));
-
-  const roleNames = userRolesList.map((r) => r.role.name);
-  const userPerms = new Set<string>();
-
-  for (const ur of userRolesList) {
-    const rolePerms = await db
-      .select({ code: permissions.code })
-      .from(rolePermissions)
-      .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
-      .where(eq(rolePermissions.roleId, ur.role.id));
-    rolePerms.forEach((p) => userPerms.add(p.code));
-  }
-
-  if (user.isSuperadmin) {
-    // Superadmin gets all permissions implicitly
-    // We still return the list empty and let frontend check isSuperadmin
-  }
+  // Fetch roles & permissions (two queries total, not one per role)
+  const { roleNames, permissions: userPerms } = await loadRolesAndPermissions(user.id);
 
   // Sign token
   const token = await signToken({

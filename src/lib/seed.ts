@@ -3,9 +3,9 @@
  */
 
 import { db } from "@/db";
-import { permissions, roles, rolePermissions, setupStatus, systemSettings } from "@/db/schema";
+import { permissions, roles, rolePermissions, setupStatus, systemSettings, users, userRoles } from "@/db/schema";
 import { ROLE_DEFAULT_PERMISSIONS, ROLE_NAMES } from "@/lib/permissions";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 
 export async function seedSystemData(): Promise<void> {
   console.log("[Seed] Seeding system permissions and roles...");
@@ -65,49 +65,51 @@ export async function seedSystemData(): Promise<void> {
     { code: "backup.restore", description: "بازگردانی پشتیبان", category: "backup" },
   ];
 
-  for (const perm of allPermissions) {
-    await db
-      .insert(permissions)
-      .values(perm)
-      .onConflictDoNothing();
-  }
+  // One statement for all permissions (unique index on code makes this idempotent).
+  await db.insert(permissions).values(allPermissions).onConflictDoNothing();
 
-  // 2. Create system roles (no organizationId — system-wide)
-  for (const roleName of Object.values(ROLE_NAMES)) {
-    await db
+  // 2. Create system roles (no organizationId — system-wide). `roles.name`
+  // has no unique constraint, so check for existing system roles explicitly
+  // to stay idempotent across re-runs.
+  const existingRoles = await db
+    .select({ id: roles.id, name: roles.name })
+    .from(roles)
+    .where(and(isNull(roles.organizationId), eq(roles.isSystem, true)));
+  const roleIdByName = new Map(existingRoles.map((r) => [r.name, r.id]));
+  const missingRoles = Object.values(ROLE_NAMES).filter((name) => !roleIdByName.has(name));
+  if (missingRoles.length > 0) {
+    const inserted = await db
       .insert(roles)
-      .values({
-        name: roleName,
-        description: roleName,
-        isSystem: true,
-      })
-      .onConflictDoNothing();
+      .values(missingRoles.map((name) => ({ name, description: name, isSystem: true })))
+      .returning({ id: roles.id, name: roles.name });
+    for (const r of inserted) roleIdByName.set(r.name, r.id);
   }
 
-  // 3. Assign permissions to roles
+  // 3. Assign default permissions to roles (bulk, idempotent).
+  const permissionRows = await db.select({ id: permissions.id, code: permissions.code }).from(permissions);
+  const permissionIdByCode = new Map(permissionRows.map((p) => [p.code, p.id]));
+  const rolePermissionRows: { roleId: string; permissionId: string }[] = [];
   for (const [roleName, perms] of Object.entries(ROLE_DEFAULT_PERMISSIONS)) {
-    // Find role
-    const [role] = await db
-      .select()
-      .from(roles)
-      .where(eq(roles.name, roleName))
-      .limit(1);
-
-    if (!role) continue;
-
+    const roleId = roleIdByName.get(roleName);
+    if (!roleId) continue;
     for (const permCode of perms) {
-      // Find permission
-      const [perm] = await db
-        .select()
-        .from(permissions)
-        .where(eq(permissions.code, permCode))
-        .limit(1);
+      const permissionId = permissionIdByCode.get(permCode);
+      if (permissionId) rolePermissionRows.push({ roleId, permissionId });
+    }
+  }
+  if (rolePermissionRows.length > 0) {
+    await db.insert(rolePermissions).values(rolePermissionRows).onConflictDoNothing();
+  }
 
-      if (!perm) continue;
-
+  // Superadmin accounts always carry the SUPER_ADMIN role so role-based UI
+  // and reports see them consistently.
+  const superAdminRoleId = roleIdByName.get(ROLE_NAMES.SUPER_ADMIN);
+  if (superAdminRoleId) {
+    const superadmins = await db.select({ id: users.id }).from(users).where(eq(users.isSuperadmin, true));
+    if (superadmins.length > 0) {
       await db
-        .insert(rolePermissions)
-        .values({ roleId: role.id, permissionId: perm.id })
+        .insert(userRoles)
+        .values(superadmins.map((u) => ({ userId: u.id, roleId: superAdminRoleId })))
         .onConflictDoNothing();
     }
   }

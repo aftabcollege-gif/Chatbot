@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq, and, isNull } from "drizzle-orm";
 import { db } from "@/db";
-import { experiences, experienceTags } from "@/db/schema";
+import { experiences, experienceTags, knowledgeChunks } from "@/db/schema";
 import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
-import { getEmbedding } from "@/lib/ai/orchestrator";
+import { enqueueJob } from "@/lib/jobs/queue";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
@@ -137,16 +137,8 @@ export async function PATCH(
   } else if (action === "publish") {
     updateData.publishedAt = new Date();
     updateData.publishedBy = user.id;
-
-    // DIRECTIVE §32: When PUBLISHED, auto-integrate into RAG Index
-    await indexExperienceForRAG(experience, user.organizationId!);
   } else if (action === "archive") {
     updateData.archivedAt = new Date();
-    // Archived experiences must disappear from retrieval/RAG immediately
-    // (directive §32/§48). Retrieval reads directly from the `experiences`
-    // table filtered by status = PUBLISHED, so clearing the embedding and
-    // status is sufficient to remove it from search/RAG.
-    updateData.embedding = null;
   }
 
   const [updated] = await db
@@ -154,6 +146,20 @@ export async function PATCH(
     .set(updateData as Partial<typeof experiences.$inferInsert>)
     .where(eq(experiences.id, id))
     .returning();
+
+  if (action === "publish") {
+    // DIRECTIVE §32: when PUBLISHED, integrate into the RAG index. Chunking +
+    // embedding run on the background worker (src/lib/experiences/pipeline.ts)
+    // so publishing returns immediately even with a slow local model.
+    await enqueueJob(experience.organizationId, "experience_ingest", experience.id, { title: experience.title });
+  } else {
+    // Any other transition leaves PUBLISHED: the retrieval predicate already
+    // hides the experience (directive §32/§48); drop its chunks as well so
+    // they stop occupying the vector/keyword indexes.
+    await db
+      .delete(knowledgeChunks)
+      .where(and(eq(knowledgeChunks.sourceType, "experience"), eq(knowledgeChunks.sourceId, id)));
+  }
 
   await logEvent({
     eventCode,
@@ -168,47 +174,4 @@ export async function PATCH(
   });
 
   return NextResponse.json(updated);
-}
-
-/**
- * DIRECTIVE §32: Automatically index a published experience into RAG.
- *
- * Retrieval reads directly from the `experiences` table (see
- * src/lib/vector-search.ts#searchExperiences), filtered to status = PUBLISHED
- * and scoped by tenant/visibility, with source_type = "experience" carried
- * through to citations so the UI can distinguish an employee-submitted
- * experience from an official document (directive §32 citation requirement).
- * We (re)compute a fresh embedding over the full, final published content
- * every time an experience is (re-)published.
- */
-async function indexExperienceForRAG(
-  experience: typeof experiences.$inferSelect,
-  _organizationId: string
-): Promise<void> {
-  try {
-    const fullText = [
-      experience.title,
-      experience.subject,
-      experience.problemDescription,
-      experience.rootCause,
-      experience.actionsTaken,
-      experience.results,
-      experience.lessonsLearned,
-      experience.suggestion,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-
-    const expEmbedding = await getEmbedding(fullText);
-    await db
-      .update(experiences)
-      .set({ embedding: expEmbedding })
-      .where(eq(experiences.id, experience.id));
-
-    console.log(`[Experience RAG] Indexed experience ${experience.id} into RAG`);
-  } catch (error) {
-    console.error(`[Experience RAG] Failed to index experience ${experience.id}:`, error);
-    // Non-fatal — experience is still published, just not searchable via RAG
-    // until the next re-index (directive §48: graceful degradation, not crash).
-  }
 }

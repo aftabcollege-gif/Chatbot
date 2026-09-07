@@ -3,7 +3,8 @@ import { eq, and, or, isNull } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { db } from "@/db";
 import { users, roles, userRoles } from "@/db/schema";
-import { getCurrentUser } from "@/lib/auth-server";
+import { getCurrentUser, revokeAllUserSessions } from "@/lib/auth-server";
+import { invalidateUserCache } from "@/lib/auth-cache";
 import { logEvent } from "@/lib/audit";
 
 export async function PATCH(
@@ -32,6 +33,12 @@ export async function PATCH(
   const [updated] = await db.update(users).set(update).where(eq(users.id, id)).returning();
   if (!updated) return NextResponse.json({ error: "کاربر یافت نشد" }, { status: 404 });
 
+  // A deactivated account or a changed password must take effect immediately
+  // on every device, not when the current sessions happen to expire.
+  if (isActive === false || password) {
+    await revokeAllUserSessions(id);
+  }
+
   if (roleName && current.organizationId) {
     const [role] = await db
       .select()
@@ -48,6 +55,8 @@ export async function PATCH(
       await db.insert(userRoles).values({ userId: id, roleId: role.id });
     }
   }
+  // Drop any cached resolution of this user so new roles/flags apply at once.
+  invalidateUserCache(id);
 
   await logEvent({
     eventCode: "USER_UPDATE",
@@ -76,6 +85,7 @@ export async function DELETE(
   }
 
   await db.delete(users).where(eq(users.id, id));
+  invalidateUserCache(id);
 
   await logEvent({
     eventCode: "USER_DELETE",

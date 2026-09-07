@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { timeAgo } from "@/lib/persian-date";
+import { sendChatMessage, ChatRequestError, type ChatSource } from "@/lib/chat-stream";
 
 interface Conversation {
   id: string;
@@ -17,25 +18,11 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   confidenceScore: number | null;
-  ragTrace?: Record<string, unknown>;
+  ragTrace?: Record<string, unknown> | null;
   createdAt: string;
 }
 
-interface Source {
-  id: string;
-  sourceType: "document" | "knowledge" | "experience";
-  title: string;
-  excerpt?: string;
-  relevanceScore?: number;
-}
-
-interface MessageResponse {
-  userMessage: Message;
-  assistantMessage: Message;
-  sources: Source[];
-  confidence: number;
-  ragTrace?: Record<string, unknown>;
-}
+type Source = ChatSource;
 
 export default function ChatPage() {
   const { user } = useAuth();
@@ -45,6 +32,7 @@ export default function ChatPage() {
   const [sources, setSources] = useState<Source[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -57,30 +45,7 @@ export default function ChatPage() {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  useEffect(() => {
-    loadConversations();
-  }, []);
-
-  const loadConversations = async () => {
-    setLoadingConversations(true);
-    try {
-      const res = await fetch("/api/chat/conversations");
-      if (res.ok) {
-        const data = await res.json() as Conversation[];
-        setConversations(data);
-        if (data.length > 0 && !activeConversationId) {
-          setActiveConversationId(data[0].id);
-          await loadMessages(data[0].id);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to load conversations", err);
-    } finally {
-      setLoadingConversations(false);
-    }
-  };
-
-  const loadMessages = async (conversationId: string) => {
+  const loadMessages = useCallback(async (conversationId: string) => {
     try {
       const res = await fetch(`/api/chat/conversations/${conversationId}/messages`);
       if (res.ok) {
@@ -90,7 +55,32 @@ export default function ChatPage() {
     } catch (err) {
       console.error("Failed to load messages", err);
     }
-  };
+  }, []);
+
+  // Initial load: conversation list, then the newest conversation's messages.
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      let list: Conversation[] = [];
+      try {
+        const res = await fetch("/api/chat/conversations");
+        if (res.ok) list = (await res.json()) as Conversation[];
+      } catch (err) {
+        console.error("Failed to load conversations", err);
+      }
+      if (cancelled) return;
+      setConversations(list);
+      setLoadingConversations(false);
+      if (list.length > 0) {
+        setActiveConversationId((current) => current ?? list[0].id);
+        await loadMessages(list[0].id);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadMessages]);
 
   const newConversation = async () => {
     try {
@@ -121,9 +111,12 @@ export default function ChatPage() {
     setInput("");
     setLoading(true);
 
-    // Optimistically add user message
+    // Optimistically add the user message and an empty assistant bubble that
+    // fills in as sources / tokens stream from the server.
+    const tempUserId = `temp-${Date.now()}`;
+    const tempAssistantId = `temp-assistant-${Date.now()}`;
     const tempUserMsg: Message = {
-      id: `temp-${Date.now()}`,
+      id: tempUserId,
       role: "user",
       content: question,
       confidenceScore: null,
@@ -131,60 +124,62 @@ export default function ChatPage() {
     };
     setMessages((prev) => [...prev, tempUserMsg]);
     setSources([]);
+    setStreamingId(null);
 
     try {
-      const res = await fetch(
-        `/api/chat/conversations/${activeConversationId}/messages`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: question }),
-        }
-      );
+      const data = await sendChatMessage(activeConversationId, question, {
+        onUserMessage: (message) => {
+          setMessages((prev) => prev.map((m) => (m.id === tempUserId ? { ...message } : m)));
+        },
+        onSources: (streamedSources) => {
+          setSources(streamedSources);
+        },
+        onToken: (_text, accumulated) => {
+          setStreamingId(tempAssistantId);
+          setMessages((prev) => {
+            const exists = prev.some((m) => m.id === tempAssistantId);
+            const partial: Message = {
+              id: tempAssistantId,
+              role: "assistant",
+              content: accumulated,
+              confidenceScore: null,
+              createdAt: new Date().toISOString(),
+            };
+            return exists ? prev.map((m) => (m.id === tempAssistantId ? partial : m)) : [...prev, partial];
+          });
+        },
+      });
 
-      if (res.ok) {
-        const data = await res.json() as MessageResponse;
-        // Replace temp message with real messages
-        setMessages((prev) =>
-          [...prev.filter((m) => m.id !== tempUserMsg.id), data.userMessage, data.assistantMessage]
-        );
-        setSources(data.sources ?? []);
-
-        // Update conversation title in list
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.id === activeConversationId
-              ? { ...c, title: question.slice(0, 60), updatedAt: new Date().toISOString() }
-              : c
-          )
-        );
-      } else {
-        setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
-        const errorData = await res.json() as { error?: string };
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `err-${Date.now()}`,
-            role: "assistant",
-            content: `خطا: ${errorData.error ?? "پاسخ دریافت نشد"}`,
-            confidenceScore: null,
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-      }
-    } catch (err) {
-      setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
       setMessages((prev) => [
-        ...prev,
+        ...prev.filter((m) => m.id !== tempUserId && m.id !== tempAssistantId && m.id !== data.userMessage.id),
+        data.userMessage,
+        data.assistantMessage,
+      ]);
+      setSources(data.sources ?? []);
+
+      // Update conversation title in list
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversationId
+            ? { ...c, title: c.title === "گفتگوی جدید" || !c.title ? question.slice(0, 60) : c.title, updatedAt: new Date().toISOString() }
+            : c
+        )
+      );
+    } catch (err) {
+      const message =
+        err instanceof ChatRequestError ? `خطا: ${err.message}` : "خطا در اتصال به سرور. لطفاً دوباره تلاش کنید.";
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempAssistantId),
         {
           id: `err-${Date.now()}`,
           role: "assistant",
-          content: "خطا در اتصال به سرور. لطفاً دوباره تلاش کنید.",
+          content: message,
           confidenceScore: null,
           createdAt: new Date().toISOString(),
         },
       ]);
     } finally {
+      setStreamingId(null);
       setLoading(false);
       inputRef.current?.focus();
     }
@@ -312,7 +307,7 @@ export default function ChatPage() {
                 </div>
               ))}
 
-              {loading && (
+              {loading && !streamingId && (
                 <div className="flex justify-start">
                   <div className="message-assistant px-4 py-3 max-w-3xl">
                     <div className="flex items-center gap-2 mb-2">
