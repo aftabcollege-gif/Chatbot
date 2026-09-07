@@ -98,9 +98,20 @@ try {
         $listing = (Get-ChildItem -Path "$Root\llm" -Recurse -File | Select-Object -First 40 -ExpandProperty Name) -join ", "
         throw "llama-server.exe not found after extracting llama.cpp. Archive contents: $listing"
     }
-    Get-ChildItem -Path $server.DirectoryName -File | ForEach-Object { Copy-Item $_.FullName "$Root\llm\$($_.Name)" -Force }
+    # Recent llama.cpp Windows zips are FLAT (binaries at the archive root), so
+    # extraction already leaves everything directly in llm\. Only stage files
+    # when the archive nested them in a subdirectory - copying a file onto
+    # itself throws "Cannot overwrite the item ... with itself".
+    $llmDir = "$Root\llm".TrimEnd('\')
+    $srcDir = $server.DirectoryName.TrimEnd('\')
+    if (-not ($srcDir -ieq $llmDir)) {
+        Write-Breadcrumb "staging llama binaries from $srcDir"
+        Get-ChildItem -Path $server.DirectoryName -File | ForEach-Object { Copy-Item $_.FullName "$Root\llm\$($_.Name)" -Force }
+    }
     if (-not (Test-Path "$Root\llm\llama-server.exe")) { throw "llama-server.exe missing" }
     Remove-Item "$Root\llm\llama.zip" -Force -ErrorAction SilentlyContinue
+    # Drop leftover extraction subdirectories so they are not packaged twice.
+    Get-ChildItem -Path "$Root\llm" -Directory | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     Write-Breadcrumb "llama-server.exe staged ($([math]::Round((Get-Item "$Root\llm\llama-server.exe").Length / 1MB, 1)) MB)"
 
     # Default lightweight LLM.
