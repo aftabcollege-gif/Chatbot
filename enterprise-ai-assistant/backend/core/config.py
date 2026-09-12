@@ -125,11 +125,25 @@ class Config:
     def theme(self) -> str:
         return self.get("app.theme", "dark")
 
+    def _resolve_asset(self, rel: str) -> Path:
+        """Resolve a shared asset path under the app root, with a packaged fallback.
+
+        When frozen by PyInstaller the backend runs from ``<resources>/backend``,
+        while the Electron shell stages shared assets (frontend build, models,
+        extensions, llm binaries) as siblings directly under ``<resources>``.
+        Check the backend directory first, then its parent, so both dev and
+        packaged layouts resolve correctly.
+        """
+        for candidate in (self.root / rel, self.root.parent / rel):
+            if candidate.exists():
+                return candidate
+        return self.root / rel
+
     def model_abspath(self, rel: str) -> Path:
         p = Path(rel)
         if p.is_absolute():
             return p
-        return self.root / rel
+        return self._resolve_asset(rel)
 
     # Auth
     @property
@@ -235,15 +249,15 @@ class Config:
 
     @property
     def extensions_dir(self) -> Path:
-        return self.root / "extensions"
+        return self._resolve_asset("extensions")
 
     @property
     def system_prompt_path(self) -> Path:
-        return self.root / "config" / "system-prompt.txt"
+        return self._resolve_asset("config/system-prompt.txt")
 
     @property
     def frontend_dist(self) -> Path:
-        return self.root / "frontend" / "dist"
+        return self._resolve_asset("frontend/dist")
 
 
 @lru_cache(maxsize=1)
