@@ -55,8 +55,13 @@ class Config:
         )
 
     def _load_yaml(self) -> None:
+        # When frozen, the backend runs from <resources>/backend while the
+        # Electron shell stages config/ as a sibling under <resources>. Search
+        # the backend dir first, then its parent, so the packaged app still
+        # loads storage.allowed_types and the rest of the YAML settings.
         for candidate in (
             self.root / "config" / "default.yaml",
+            self.root.parent / "config" / "default.yaml",
             Path(__file__).resolve().parent.parent.parent / "config" / "default.yaml",
         ):
             if candidate.exists():
