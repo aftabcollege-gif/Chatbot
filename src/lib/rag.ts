@@ -100,6 +100,23 @@ function buildContext(sources: RagSource[]): { context: string; usedSources: Rag
   return { context: contextParts.join("\n\n---\n\n"), usedSources };
 }
 
+/**
+ * Map a retrieval score onto a 0..1 confidence badge.
+ *
+ * `relevanceScore` here is a Reciprocal Rank Fusion score, whose theoretical
+ * maximum is 2/(RRF_K+1) ≈ 0.033 when a chunk ranks first in both the vector
+ * and the keyword list. Showing it raw meant even a perfect match rendered as
+ * "اطمینان: ۳٪". Normalize against that maximum so the badge is meaningful.
+ */
+function computeConfidence(sources: RagSource[]): number {
+  const top = sources[0];
+  if (!top) return 0;
+  const RRF_K = 60;
+  const maxFused = 2 / (RRF_K + 1);
+  const normalized = top.relevanceScore / maxFused;
+  return Math.max(0, Math.min(1, normalized));
+}
+
 /** Build extractive answer when LLM is not available */
 function buildExtractiveAnswer(sources: RagSource[]): string {
   const topSource = sources[0];
@@ -178,10 +195,7 @@ export async function answerWithRag(
 
     ragTrace.responseTimeMs = Date.now() - startMs;
 
-    const confidence = Math.max(
-      0,
-      Math.min(1, usedSources[0]?.relevanceScore ?? 0),
-    );
+    const confidence = computeConfidence(usedSources);
 
     return {
       answer: llmResponse.content,
@@ -199,7 +213,7 @@ export async function answerWithRag(
     return {
       answer: buildExtractiveAnswer(usedSources),
       sources: usedSources,
-      confidence: usedSources[0]?.relevanceScore ?? 0,
+      confidence: computeConfidence(usedSources),
       usedLLM: false,
       ragTrace,
     };

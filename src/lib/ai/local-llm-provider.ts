@@ -41,6 +41,15 @@ export class LocalLlmProvider implements LlmProvider {
           temperature: options.temperature ?? config.localLlm.temperature,
           maxTokens: options.maxTokens ?? config.localLlm.maxTokens,
           signal: options.signal,
+          // Repetition control. Without an explicit penalty a small instruct
+          // model at low temperature can collapse into an infinite loop,
+          // repeating the same clause until maxTokens is exhausted.
+          repeatPenalty: {
+            lastTokens: 96,
+            penalty: config.localLlm.repeatPenalty,
+            frequencyPenalty: config.localLlm.frequencyPenalty,
+            presencePenalty: config.localLlm.presencePenalty,
+          },
           onTextChunk: (chunk: string) => {
             text += chunk;
             options.onToken?.(chunk);

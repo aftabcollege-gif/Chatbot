@@ -163,11 +163,26 @@ class Config:
 
     @property
     def llm_max_tokens(self) -> int:
-        return int(self.get("llm.max_tokens", 2048))
+        return int(self.get("llm.max_tokens", 900))
 
     @property
     def llm_context_size(self) -> int:
         return int(self.get("llm.context_size", 4096))
+
+    @property
+    def llm_repeat_penalty(self) -> float:
+        """llama.cpp repeat_penalty. 1.0 disables it, which lets small models
+        fall into infinite repetition loops. 1.15 is a safe default for
+        Persian instruct models."""
+        return float(self.get("llm.repeat_penalty", 1.15))
+
+    @property
+    def llm_frequency_penalty(self) -> float:
+        return float(self.get("llm.frequency_penalty", 0.3))
+
+    @property
+    def llm_presence_penalty(self) -> float:
+        return float(self.get("llm.presence_penalty", 0.3))
 
     # Embedding
     @property
@@ -206,11 +221,11 @@ class Config:
 
     @property
     def rag_context_max_tokens(self) -> int:
-        return int(self.get("rag.context_max_tokens", 3000))
+        return int(self.get("rag.context_max_tokens", 2600))
 
     @property
     def rag_history_max_tokens(self) -> int:
-        return int(self.get("rag.chat_history_max_tokens", 1500))
+        return int(self.get("rag.chat_history_max_tokens", 400))
 
     @property
     def rag_min_confidence(self) -> float:

@@ -16,7 +16,16 @@ llm:
   model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
   context_size: 4096
   temperature: 0.1
-  max_tokens: 2048
+  # max_tokens must leave room for the prompt inside context_size.
+  # 5 chunks x 512 tokens + system prompt ~= 2800 tokens of prompt, so
+  # reserving 2048 for output overflowed the 4096 window and truncated the
+  # answer mid-sentence.
+  max_tokens: 900
+  # Repetition control (llama.cpp defaults repeat_penalty to 1.0 = disabled,
+  # which causes small models to loop the same phrase forever).
+  repeat_penalty: 1.15
+  frequency_penalty: 0.3
+  presence_penalty: 0.3
   threads: 0
   gpu_layers: 0
 
@@ -34,8 +43,11 @@ rag:
   chunk_overlap: 50
   retrieval_top_k: 20
   reranker_top_k: 5
-  context_max_tokens: 3000
-  chat_history_max_tokens: 1500
+  # Must fit alongside the system prompt (~300 tok), the answer reservation
+  # (llm.max_tokens) and any chat history, inside llm.context_size.
+  #   2600 context + 900 output + ~300 system = 3800 < 4096
+  context_max_tokens: 2600
+  chat_history_max_tokens: 400
   min_confidence: 0.3
 
 ocr:

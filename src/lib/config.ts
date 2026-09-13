@@ -33,6 +33,11 @@ export const config = {
     gpuLayers: readNumber(process.env.LOCAL_LLM_GPU_LAYERS, 0),
     temperature: readNumber(process.env.LOCAL_LLM_TEMPERATURE, 0.1),
     maxTokens: readNumber(process.env.LOCAL_LLM_MAX_TOKENS, 512),
+    // llama.cpp disables the repeat penalty by default (1.0), which lets
+    // small models loop the same phrase forever. Keep these enabled.
+    repeatPenalty: readNumber(process.env.LOCAL_LLM_REPEAT_PENALTY, 1.15),
+    frequencyPenalty: readNumber(process.env.LOCAL_LLM_FREQUENCY_PENALTY, 0.3),
+    presencePenalty: readNumber(process.env.LOCAL_LLM_PRESENCE_PENALTY, 0.3),
   },
 
   localEmbedding: {

@@ -20,7 +20,13 @@ from core.config import settings
 from services.embedding_service import get_embedding_service
 from services.reranker_service import get_reranker_service
 from services import llm_service
-from utils.persian import detect_language, normalize_persian, tokenize
+from utils.persian import (
+    approximate_tokens,
+    detect_language,
+    normalize_persian,
+    tokenize,
+    truncate_words,
+)
 
 
 @dataclass
@@ -381,6 +387,17 @@ def retrieve(
         for idx, score in reranked:
             merged[idx].score = round(float(score), 4)
             final.append(merged[idx])
+
+        # Drop weakly-related passages. `rag.min_confidence` was defined in
+        # config but never applied, so every query returned a full set of
+        # `reranker_top_k` chunks even when only one was actually relevant -
+        # padding the prompt with off-topic law articles and inviting the
+        # model to ramble. Always keep the best hit so a usable answer (or an
+        # honest "not found") is still possible.
+        floor = settings.rag_min_confidence
+        if final:
+            kept = [c for c in final if c.score >= floor] or final[:1]
+            final = kept
         merged = final
 
     elapsed = (time.time() - start) * 1000
@@ -388,14 +405,39 @@ def retrieve(
 
 
 def assemble_context(chunks: List[RetrievedChunk]) -> str:
+    """Build the numbered source block, respecting the context budget.
+
+    `rag.context_max_tokens` existed in config but was never enforced here,
+    so five 512-token chunks plus the system prompt and history could exceed
+    the 4096-token window. llama.cpp then silently evicted the beginning of
+    the prompt - including the instructions - which is a classic trigger for
+    off-topic, rambling, or looping output.
+    """
+    budget = settings.rag_context_max_tokens
     lines: List[str] = []
+    used = 0
     for i, c in enumerate(chunks, start=1):
         title = c.title or "منبع"
         ref = f"[{i}] ({title}"
         if c.page_number:
             ref += f"، صفحه {c.page_number}"
         ref += ")"
-        lines.append(f"{ref}\n{c.content}")
+
+        content = c.content
+        cost = approximate_tokens(ref) + approximate_tokens(content)
+        remaining = budget - used
+        if remaining <= 0:
+            break
+        if cost > remaining:
+            # Truncate this chunk to whatever budget is left rather than
+            # dropping it entirely, so the top source is never lost.
+            allowance = max(0, remaining - approximate_tokens(ref))
+            if allowance < 20:
+                break
+            content = truncate_words(content, allowance)
+            cost = remaining
+        lines.append(f"{ref}\n{content}")
+        used += cost
     return "\n\n".join(lines)
 
 
@@ -420,9 +462,26 @@ def sources_payload(chunks: List[RetrievedChunk]) -> List[Dict[str, Any]]:
 
 
 def average_confidence(chunks: List[RetrievedChunk]) -> float:
+    """Confidence of the retrieval, driven by the best-matching source.
+
+    Previously this averaged the scores of every returned chunk. Because the
+    reranker normalizes the top hit to 1.0 and the tail decays towards 0, a
+    perfect match surrounded by weak filler still averaged out to a tiny
+    number - which is why a good answer could be labelled "اطمینان: ۸٪".
+
+    The top score reflects "did we find the right passage?", which is what
+    the badge is meant to communicate. The mean of the remaining chunks is
+    folded in with a small weight so a result set that is strong throughout
+    still scores higher than a single lucky hit.
+    """
     if not chunks:
         return 0.0
-    return round(sum(c.score for c in chunks) / len(chunks), 4)
+    scores = sorted((c.score for c in chunks), reverse=True)
+    top = scores[0]
+    if len(scores) == 1:
+        return round(max(0.0, min(1.0, top)), 4)
+    rest = sum(scores[1:]) / len(scores[1:])
+    return round(max(0.0, min(1.0, 0.8 * top + 0.2 * rest)), 4)
 
 
 async def answer_stream(

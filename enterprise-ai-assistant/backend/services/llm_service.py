@@ -18,7 +18,70 @@ from typing import AsyncIterator, Dict, List, Optional
 import httpx
 
 from core.config import settings
-from utils.persian import normalize_persian, tokenize, truncate_words
+from utils.persian import (
+    approximate_tokens,
+    normalize_persian,
+    tokenize,
+    truncate_words,
+)
+
+
+class RepetitionGuard:
+    """Detects degenerate repetition in a token stream and stops it.
+
+    Sampling penalties make loops unlikely but not impossible, so this is a
+    hard backstop: even if the model starts cycling, the user never sees a
+    wall of the same clause repeated hundreds of times.
+
+    Two independent checks run over a rolling tail of the generated text:
+
+    1. Phrase loop - the same normalized n-gram repeats ``max_phrase_repeats``
+       times in a row (catches "و مزی ثابت و مزی ثابت و مزی ثابت ...").
+    2. Low diversity - once the tail is long enough, the ratio of unique
+       words to total words collapses below ``min_unique_ratio``.
+    """
+
+    def __init__(
+        self,
+        window_words: int = 60,
+        max_phrase_repeats: int = 4,
+        min_unique_ratio: float = 0.22,
+        min_words_before_check: int = 40,
+    ) -> None:
+        self.window_words = window_words
+        self.max_phrase_repeats = max_phrase_repeats
+        self.min_unique_ratio = min_unique_ratio
+        self.min_words_before_check = min_words_before_check
+        self._words: List[str] = []
+
+    def feed(self, text: str) -> bool:
+        """Add streamed text. Returns True when the stream should be cut."""
+        if not text:
+            return False
+        self._words.extend(text.split())
+        if len(self._words) < self.min_words_before_check:
+            return False
+        tail = self._words[-self.window_words :]
+
+        # 1) Repeating n-gram check, from longer to shorter phrases.
+        for size in range(1, 7):
+            if len(tail) < size * self.max_phrase_repeats:
+                continue
+            block = tail[-size:]
+            repeats = 1
+            pos = len(tail) - size
+            while pos - size >= 0 and tail[pos - size : pos] == block:
+                repeats += 1
+                pos -= size
+                if repeats >= self.max_phrase_repeats:
+                    return True
+
+        # 2) Vocabulary-collapse check.
+        if len(tail) >= self.window_words:
+            unique_ratio = len(set(tail)) / len(tail)
+            if unique_ratio < self.min_unique_ratio:
+                return True
+        return False
 
 
 class LLMSession:
@@ -50,7 +113,17 @@ class LLMSession:
             "stream": True,
             "temperature": settings.llm_temperature if temperature is None else temperature,
             "max_tokens": settings.llm_max_tokens,
+            # Repetition control. Without these, llama.cpp defaults to
+            # repeat_penalty=1.0 (disabled), and a small instruct model at
+            # temperature 0.1 will collapse into an infinite loop, emitting
+            # the same clause ("و مزی ثابت و مزی ثابت ...") until max_tokens
+            # is exhausted. This is the single most common cause of the
+            # "stuck answer" symptom on Persian RAG prompts.
+            "repeat_penalty": settings.llm_repeat_penalty,
+            "frequency_penalty": settings.llm_frequency_penalty,
+            "presence_penalty": settings.llm_presence_penalty,
         }
+        guard = RepetitionGuard()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream(
                 "POST",
@@ -68,10 +141,15 @@ class LLMSession:
                         chunk = json.loads(data)
                         delta = chunk["choices"][0].get("delta", {})
                         content = delta.get("content")
-                        if content:
-                            yield content
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+                    if content:
+                        yield content
+                        if guard.feed(content):
+                            # Degenerate loop detected - abandon the stream
+                            # instead of flooding the user with repeats.
+                            print("[llm] repetition loop detected, stopping stream")
+                            return
 
 
 # --------------------------------------------------------------------------- #
@@ -149,12 +227,20 @@ def build_messages(
     )
     user_block = f"{ctx_instruction}\n\nمنابع:\n{context}\n\nپرسش: {question}"
     messages = [{"role": "system", "content": system_prompt}]
-    # Trim history to stay within budget.
-    budget = settings.rag_history_max_tokens
+
+    # Trim history to stay within budget. The budget must also account for
+    # what the system prompt and the source block already consume, otherwise
+    # history alone could push the request past the model's context window
+    # and silently evict the instructions.
+    fixed_cost = approximate_tokens(system_prompt) + approximate_tokens(user_block)
+    reserve_for_output = settings.llm_max_tokens
+    available = settings.llm_context_size - fixed_cost - reserve_for_output
+    budget = max(0, min(settings.rag_history_max_tokens, available))
+
     acc = 0
     trimmed: List[Dict[str, str]] = []
     for msg in reversed(history[-10:]):
-        size = len(msg.get("content", "").split())
+        size = approximate_tokens(msg.get("content", ""))
         if acc + size > budget:
             break
         trimmed.insert(0, msg)
