@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { processingJobs, type JobStatus } from "@/db/schema";
 
-export type JobType = "document_ingest" | "experience_ingest";
+export type JobType = "document_ingest" | "experience_ingest" | "reindex_all";
 
 export async function enqueueJob(
   organizationId: string,
@@ -20,7 +20,12 @@ export async function enqueueJob(
 export async function updateJobStatus(
   jobId: string,
   status: JobStatus,
-  patch: Partial<{ progress: number; error: string | null; retryCount: number }> = {},
+  patch: Partial<{
+    progress: number;
+    error: string | null;
+    retryCount: number;
+    result: string | null;
+  }> = {},
 ): Promise<void> {
   const values: Record<string, unknown> = { status, ...patch };
   if (status === "PROCESSING") values.startedAt = new Date();

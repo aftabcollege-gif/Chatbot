@@ -145,9 +145,10 @@ CREATE TABLE "knowledge_chunks" (
 	"page" integer,
 	"chunk_index" integer NOT NULL,
 	"content" text NOT NULL,
+	"content_norm" text,
 	"token_count" integer DEFAULT 0 NOT NULL,
 	"embedding" vector(1024),
-	"content_tsv" "tsvector" GENERATED ALWAYS AS (to_tsvector('simple', "knowledge_chunks"."content")) STORED,
+	"content_tsv" "tsvector" GENERATED ALWAYS AS (to_tsvector('simple', coalesce("knowledge_chunks"."content_norm", ''))) STORED,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
@@ -261,6 +262,7 @@ CREATE TABLE "processing_jobs" (
 	"retry_count" integer DEFAULT 0 NOT NULL,
 	"max_retries" integer DEFAULT 3 NOT NULL,
 	"error" text,
+	"result" text,
 	"payload" jsonb DEFAULT '{}'::jsonb,
 	"started_at" timestamp with time zone,
 	"completed_at" timestamp with time zone,

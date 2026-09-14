@@ -390,10 +390,19 @@ export const knowledgeChunks = pgTable(
     page: integer("page"),
     chunkIndex: integer("chunk_index").notNull(),
     content: text("content").notNull(),
+    /**
+     * Normalized copy of `content` used for full-text search. Persian text
+     * must be normalized (ZWNJ → space, ي/ك/ة unification, digit unification,
+     * diacritic removal) BEFORE tokenization — otherwise the default parser
+     * keeps the invisible ZWNJ inside indexed tokens and most queries miss.
+     * See src/lib/text/normalize.ts.
+     */
+    contentNorm: text("content_norm"),
     tokenCount: integer("token_count").notNull().default(0),
     embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
     contentTsv: tsVector("content_tsv").generatedAlwaysAs(
-      (): SQL => sql`to_tsvector('simple', ${knowledgeChunks.content})`,
+      (): SQL =>
+        sql`to_tsvector('simple', coalesce(${knowledgeChunks.contentNorm}, ''))`,
     ),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -435,6 +444,8 @@ export const processingJobs = pgTable(
     retryCount: integer("retry_count").notNull().default(0),
     maxRetries: integer("max_retries").notNull().default(3),
     error: text("error"),
+    /** JSON summary of the job result (set on completion). */
+    result: text("result"),
     payload: jsonb("payload").$type<Record<string, unknown>>().default({}),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
