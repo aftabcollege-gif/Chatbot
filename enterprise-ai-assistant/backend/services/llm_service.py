@@ -75,20 +75,55 @@ class LLMSession:
 
 
 # --------------------------------------------------------------------------- #
-# Offline extractive fallback
+# Offline extractive fallback - IMPROVED MULTI-SOURCE SYNTHESIS
 # --------------------------------------------------------------------------- #
-def _best_snippet(query_tokens: List[str], text: str) -> tuple[str, float]:
-    sentences = re.split(r"(?<=[.!?؟。])\s+|\n+", text)
-    best, best_score = "", 0.0
-    qset = set(query_tokens)
-    for sent in sentences:
-        stoks = set(tokenize(sent))
-        if not stoks:
+def _split_sentences(text: str) -> List[str]:
+    raw = re.split(r"(?<=[.!?؟。])\s+|\n+", text)
+    out = []
+    for s in raw:
+        s = s.strip()
+        if len(s) < 10:
             continue
-        overlap = len(qset & stoks)
-        score = overlap / (len(qset) + 1e-9)
+        if len(s) > 300:
+            parts = re.split(r"[؛;،,]\s+", s)
+            for p in parts:
+                p = p.strip()
+                if len(p) >= 15:
+                    out.append(p)
+        else:
+            out.append(s)
+    return out
+
+
+def _score_sentence(query_tokens: List[str], sentence: str) -> float:
+    stoks = tokenize(sentence)
+    if not stoks:
+        return 0.0
+    qset = set(query_tokens)
+    sset = set(stoks)
+    if not qset:
+        return 0.0
+    overlap = len(qset & sset)
+    jaccard = overlap / len(qset | sset) if (qset | sset) else 0.0
+    overlap_ratio = overlap / len(qset)
+    length_factor = 1.0
+    if len(stoks) < 5:
+        length_factor = 0.5
+    elif len(stoks) > 60:
+        length_factor = 0.8
+    return (overlap_ratio * 0.6 + jaccard * 0.4) * length_factor
+
+
+def _best_snippet(query_tokens: List[str], text: str) -> tuple[str, float]:
+    sentences = _split_sentences(text)
+    best, best_score = "", 0.0
+    for sent in sentences:
+        score = _score_sentence(query_tokens, sent)
         if score > best_score:
             best, best_score = sent.strip(), score
+    if not best and text:
+        best = truncate_words(text.strip(), 40)
+        best_score = 0.1
     return best, best_score
 
 
@@ -98,7 +133,13 @@ async def extractive_stream(
     history: List[Dict[str, str]],
     language: str = "fa",
 ) -> AsyncIterator[str]:
-    """Yield an answer composed from retrieved sources, word-by-word."""
+    """Yield an answer composed from retrieved sources, word-by-word.
+    
+    Improved multi-source synthesis:
+    - Scores all sentences across all sources
+    - Picks diverse sentences from different sources
+    - Combines them into a coherent answer with proper citations
+    """
     q_tokens = tokenize(normalize_persian(question))
     fa = language.startswith("fa")
 
@@ -113,23 +154,95 @@ async def extractive_stream(
             yield word + " "
         return
 
-    # Pick the most relevant snippets.
-    ranked = []
-    for src in sources:
-        snippet, score = _best_snippet(q_tokens, src.get("content", ""))
-        ranked.append((score, snippet, src))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    ranked = [r for r in ranked if r[1]][:3]
+    all_scored: List[tuple[float, str, int, Dict]] = []
+    for src_idx, src in enumerate(sources):
+        content = src.get("content", "")
+        sentences = _split_sentences(content)
+        for sent in sentences:
+            score = _score_sentence(q_tokens, sent)
+            if score > 0.01:
+                all_scored.append((score, sent, src_idx, src))
 
-    intro = (
-        f"بر اساس {len(ranked)} منبع بازیابی‌شده، " if fa else f"Based on {len(ranked)} retrieved source(s), "
-    )
-    yield intro
+    all_scored.sort(key=lambda x: x[0], reverse=True)
 
-    for i, (_, snippet, src) in enumerate(ranked, start=1):
-        marker = f"[{i}] "
-        text = marker + truncate_words(snippet, 60) + " "
-        for word in text.split():
+    if not all_scored:
+        ranked = []
+        for src_idx, src in enumerate(sources):
+            snippet, score = _best_snippet(q_tokens, src.get("content", ""))
+            if snippet:
+                ranked.append((score, snippet, src_idx, src))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        all_scored = ranked[:5]
+        if not all_scored:
+            noinfo = (
+                "بر اساس منابع موجود، اطلاعات مرتبط یافت شد اما تطابق دقیق با پرسش کم است. "
+                "لطفاً پرسش را دقیق‌تر مطرح کنید."
+                if fa
+                else "Relevant sources were found but with low exact match. Please refine your question."
+            )
+            for word in noinfo.split():
+                yield word + " "
+            return
+
+    selected: List[tuple[float, str, int, Dict]] = []
+    used_source_indices = set()
+    for item in all_scored:
+        _, _, src_idx, _ = item
+        if src_idx not in used_source_indices:
+            selected.append(item)
+            used_source_indices.add(src_idx)
+        if len(selected) >= 5:
+            break
+    if len(selected) < 7:
+        for item in all_scored:
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= 7:
+                break
+
+    selected.sort(key=lambda x: (x[2], -x[0]))
+
+    if fa:
+        if len(used_source_indices) > 1:
+            intro = f"بر اساس {len(used_source_indices)} منبع مرتبط:\n\n"
+        else:
+            intro = "بر اساس منابع بازیابی‌شده:\n\n"
+    else:
+        if len(used_source_indices) > 1:
+            intro = f"Based on {len(used_source_indices)} relevant sources:\n\n"
+        else:
+            intro = "Based on retrieved sources:\n\n"
+
+    for word in intro.split():
+        yield word + " "
+    if "\n\n" in intro:
+        yield "\n\n"
+
+    from collections import defaultdict
+    by_source: Dict[int, List[tuple[float, str, Dict]]] = defaultdict(list)
+    for score, sent, src_idx, src in selected:
+        by_source[src_idx].append((score, sent, src))
+
+    for src_idx in sorted(by_source.keys()):
+        sentences_in_source = by_source[src_idx]
+        citation_num = src_idx + 1
+        for score, sent, src in sentences_in_source:
+            clean_sent = sent.strip()
+            if not clean_sent.endswith((".", "!", "?", "؟", "。")):
+                clean_sent += "."
+            text_with_cite = f"{clean_sent} [{citation_num}] "
+            for word in text_with_cite.split():
+                yield word + " "
+        if len(by_source) > 1:
+            yield "\n\n"
+
+    if fa and len(used_source_indices) > 1:
+        outro = f"\n\n(این پاسخ از ترکیب اطلاعات {len(used_source_indices)} منبع استخراج شده است.)"
+        for word in outro.split():
+            yield word + " "
+    elif not fa and len(used_source_indices) > 1:
+        outro = f"\n\n(This answer synthesizes information from {len(used_source_indices)} sources.)"
+        for word in outro.split():
             yield word + " "
 
 
@@ -140,20 +253,45 @@ def build_messages(
     context: str,
     language: str = "fa",
 ) -> List[Dict[str, str]]:
-    ctx_instruction = (
-        "پاسخ خود را تنها بر اساس متن منبع زیر بنویس و به شماره منبع استناد کن. "
-        "اگر اطلاعات کافی نیست، صریحاً بگو."
-        if language.startswith("fa")
-        else "Answer strictly using the source context below and cite the source numbers. "
-        "If the context is insufficient, say so explicitly."
-    )
-    user_block = f"{ctx_instruction}\n\nمنابع:\n{context}\n\nپرسش: {question}"
+    # Strong, explicit instruction for multi-source synthesis and grounding
+    if language.startswith("fa"):
+        ctx_instruction = (
+            "دستورالعمل حیاتی - باید دقیقاً رعایت شود:\n"
+            "۱. تو فقط بر اساس منابع زیر پاسخ می‌دهی. هیچ اطلاعات خارج از منابع را اضافه نکن.\n"
+            "۲. اگر پاسخ در چند منبع پخش شده، اطلاعات آن‌ها را ترکیب کن. مثال: اگر منبع [۱] بخشی و منبع [۲] بخش دیگر را دارد، هر دو را بیاور.\n"
+            "۳. هر جمله مهم باید استناد داشته باشد: [۱] یا [۱، ۲] یا [۲، ۳]\n"
+            "۴. شماره منبع را دقیقاً همان‌طور که در برچسب منبع آمده استفاده کن.\n"
+            "۵. اعداد، تاریخ‌ها، اسامی را دقیقاً از منبع کپی کن - تحریف نکن.\n"
+            "۶. اگر منابع تناقض دارند، تناقض را بگو.\n"
+            "۷. اگر اطلاعات کافی نیست، صریحاً بگو «اطلاعات کافی در منابع موجود نیست».\n"
+            "۸. پاسخ را به صورت ساختاریافته، دقیق و کوتاه بنویس.\n"
+            "\n"
+            "فرمت منابع: هر منبع با برچسب --- منبع [شماره]: عنوان --- شروع می‌شود و با --- پایان منبع [شماره] --- تمام می‌شود.\n"
+            "تو باید از محتوای داخل این برچسب‌ها استفاده کنی و با همان شماره استناد کنی."
+        )
+    else:
+        ctx_instruction = (
+            "CRITICAL INSTRUCTIONS - MUST FOLLOW:\n"
+            "1. Answer ONLY based on the sources below. Do not add external knowledge.\n"
+            "2. If the answer is spread across multiple sources, SYNTHESIZE them. Example: if source [1] has part A and source [2] has part B, combine both.\n"
+            "3. Every important sentence MUST have a citation: [1] or [1, 2] or [2, 3]\n"
+            "4. Use the exact source numbers as labeled.\n"
+            "5. Copy numbers, dates, names exactly as in sources - do not distort.\n"
+            "6. If sources contradict, mention the contradiction.\n"
+            "7. If insufficient info, explicitly say 'Insufficient information in available sources'.\n"
+            "8. Be structured, accurate and concise.\n"
+            "\n"
+            "Source format: Each source starts with --- Source [number]: title --- and ends with --- End Source [number] ---.\n"
+            "You must use content inside these tags and cite with the same number."
+        )
+
+    user_block = f"{ctx_instruction}\n\n{context}\n\n{'پرسش' if language.startswith('fa') else 'Question'}: {question}\n\n{'پاسخ (با استناد دقیق به منابع):' if language.startswith('fa') else 'Answer (with precise citations):'}"
+
     messages = [{"role": "system", "content": system_prompt}]
-    # Trim history to stay within budget.
     budget = settings.rag_history_max_tokens
     acc = 0
     trimmed: List[Dict[str, str]] = []
-    for msg in reversed(history[-10:]):
+    for msg in reversed(history[-6:]):
         size = len(msg.get("content", "").split())
         if acc + size > budget:
             break

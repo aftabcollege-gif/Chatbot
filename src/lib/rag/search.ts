@@ -191,8 +191,41 @@ export async function hybridSearch(organizationId: string, rawQuery: string): Pr
   // similarity floor (RAG_MIN_SCORE) to avoid grounding on noise.
   const ranked = Array.from(fused.values())
     .filter((chunk) => chunk.vectorScore >= config.rag.minScore || chunk.keywordScore > 0)
+    .sort((a, b) => b.fusedScore - a.fusedScore);
+
+  // Diversify: ensure multi-source coverage - critical fix for multi-source synthesis
+  // Avoid too many chunks from same source_id in final results
+  const seenSourceIds = new Map<string, number>();
+  const diversified: RetrievedChunk[] = [];
+  const remaining: RetrievedChunk[] = [];
+
+  for (const chunk of ranked) {
+    const count = seenSourceIds.get(chunk.sourceId) ?? 0;
+    // Allow max 2 chunks per same source to ensure diversity across documents
+    if (count < 2) {
+      diversified.push(chunk);
+      seenSourceIds.set(chunk.sourceId, count + 1);
+    } else {
+      remaining.push(chunk);
+    }
+    // Stop when we have enough diversified chunks
+    if (diversified.length >= config.rag.topK) break;
+  }
+
+  // If we filtered too aggressively, fill up from remaining
+  if (diversified.length < config.rag.topK) {
+    for (const chunk of remaining) {
+      if (diversified.length >= config.rag.topK) break;
+      diversified.push(chunk);
+    }
+  }
+
+  // Final sort by fusedScore and slice
+  const finalRanked = diversified
     .sort((a, b) => b.fusedScore - a.fusedScore)
     .slice(0, config.rag.topK);
 
-  return ranked;
+  console.log(`[RAG] hybridSearch: ${finalRanked.length} chunks, ${new Set(finalRanked.map(c => c.sourceId)).size} distinct sources from ${ranked.length} candidates`);
+
+  return finalRanked;
 }

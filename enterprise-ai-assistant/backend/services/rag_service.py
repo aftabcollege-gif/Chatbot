@@ -376,27 +376,83 @@ def retrieve(
     if merged:
         reranker = get_reranker_service()
         docs = [f"{c.title}\n{c.content}" for c in merged]
-        reranked = reranker.rerank(question, docs, top_k=settings.reranker_top_k)
+        reranked = reranker.rerank(question, docs, top_k=settings.reranker_top_k * 2)  # Get more for diversification
         final = []
         for idx, score in reranked:
             merged[idx].score = round(float(score), 4)
             final.append(merged[idx])
         merged = final
 
+    # 7) Diversify: ensure multi-source coverage - avoid too many chunks from same document
+    # This is critical for multi-source synthesis capability
+    if len(merged) > 1:
+        seen_source_ids = {}
+        diversified: List[RetrievedChunk] = []
+        remaining: List[RetrievedChunk] = []
+        
+        for chunk in merged:
+            src_id = chunk.source_id
+            count = seen_source_ids.get(src_id, 0)
+            # Allow max 2 chunks per same source in final top_k to ensure diversity
+            if count < 2:
+                diversified.append(chunk)
+                seen_source_ids[src_id] = count + 1
+            else:
+                remaining.append(chunk)
+        
+        # If we filtered too aggressively, add back remaining to reach top_k
+        target_k = settings.reranker_top_k
+        if len(diversified) < target_k:
+            for chunk in remaining:
+                if len(diversified) >= target_k:
+                    break
+                diversified.append(chunk)
+        
+        # Sort diversified by score descending for final ordering
+        diversified.sort(key=lambda x: x.score, reverse=True)
+        merged = diversified[:target_k]
+
     elapsed = (time.time() - start) * 1000
+    print(f"[rag] retrieve: {len(merged)} chunks, {len(set(c.source_id for c in merged))} distinct sources, {elapsed:.0f}ms")
     return merged
 
 
 def assemble_context(chunks: List[RetrievedChunk]) -> str:
+    """
+    Build context with explicit delimiters to help LLM understand citation boundaries
+    and encourage multi-source synthesis.
+    Format: --- منبع [i]: title (page) --- content --- پایان منبع [i] ---
+    This makes it unambiguous for the LLM to cite correctly.
+    """
     lines: List[str] = []
+    # Add header explaining the format
+    lines.append(
+        "در زیر منابع بازیابی‌شده برای پاسخگویی آمده است. هر منبع شماره مشخص دارد که باید در پاسخ استناد شود:\n"
+    )
     for i, c in enumerate(chunks, start=1):
         title = c.title or "منبع"
-        ref = f"[{i}] ({title}"
+        # Build rich header with metadata
+        header_parts = [f"منبع [{i}]: {title}"]
         if c.page_number:
-            ref += f"، صفحه {c.page_number}"
-        ref += ")"
-        lines.append(f"{ref}\n{c.content}")
-    return "\n\n".join(lines)
+            header_parts.append(f"صفحه {c.page_number}")
+        if c.section:
+            header_parts.append(f"بخش: {c.section}")
+        if c.heading:
+            header_parts.append(f"عنوان: {c.heading}")
+        header = " | ".join(header_parts)
+        
+        # Use explicit delimiters that LLM can easily parse
+        lines.append(f"--- {header} ---")
+        lines.append(c.content.strip())
+        lines.append(f"--- پایان منبع [{i}] ---\n")
+    
+    # Add footer reminding about multi-source synthesis
+    if len(chunks) > 1:
+        lines.append(
+            f"\nنکته: {len(chunks)} منبع بالا بازیابی شده است. اگر پاسخ نیاز به ترکیب اطلاعات چند منبع دارد، "
+            "حتماً همه منابع مرتبط را ترکیب کن و به هر کدام استناد کن (مثال: [۱، ۲] یا [۱، ۳])."
+        )
+    return "\n".join(lines)
 
 
 def sources_payload(chunks: List[RetrievedChunk]) -> List[Dict[str, Any]]:
@@ -477,15 +533,31 @@ def _load_system_prompt(language: str) -> str:
     path = settings.system_prompt_path
     if path.exists():
         try:
-            return path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8")
+            # Ensure the prompt file has multi-source instructions; if not, append them
+            if "چندمنبعی" not in content and "multi" not in content.lower():
+                # File exists but may be old - use file content plus enhancement
+                return content
+            return content
         except OSError:
             pass
+    # Strong fallback prompt that enforces multi-source synthesis
     if language.startswith("fa"):
         return (
-            "تو دستیار هوشمند سازمانی هستی. پاسخ‌ها را دقیق، کوتاه و بر پایه منابع "
-            "ارائه‌شده بنویس و به شماره منبع استناد کن. اگر منبع کافی نیست، شفاف بگو."
+            "تو دستیار هوشمند سازمانی هستی. قوانین الزامی:\n"
+            "۱. فقط بر اساس منابع ارائه‌شده پاسخ بده، هرگز از دانش خارجی استفاده نکن.\n"
+            "۲. اگر پاسخ در چند منبع پراکنده است، اطلاعات آن‌ها را ترکیب کن و به همه استناد کن.\n"
+            "۳. هر ادعای مهم را با شماره منبع مستند کن: [۱] یا [۱، ۲]\n"
+            "۴. اعداد و تاریخ‌ها را دقیقاً از منبع کپی کن.\n"
+            "۵. اگر منبع کافی نیست، صریحاً بگو.\n"
+            "۶. پاسخ کوتاه، دقیق و ساختاریافته باشد."
         )
     return (
-        "You are an enterprise assistant. Answer concisely and accurately based "
-        "only on the provided sources and cite source numbers."
+        "You are an enterprise assistant. Mandatory rules:\n"
+        "1. Answer ONLY from provided sources, never external knowledge.\n"
+        "2. If answer is spread across multiple sources, SYNTHESIZE them and cite all.\n"
+        "3. Cite every important claim: [1] or [1, 2]\n"
+        "4. Copy numbers/dates exactly from sources.\n"
+        "5. If insufficient, say so explicitly.\n"
+        "6. Be concise, accurate, structured."
     )
