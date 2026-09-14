@@ -20,6 +20,7 @@
     "appId": "com.enterpriseai.assistant",
     "productName": "Chatbot Enterprise",
     "artifactName": "Chatbot-Enterprise-${version}-${arch}.${ext}",
+    "afterAllArtifactBuild": "scripts/collect-msi.cjs",
     "directories": {
       "output": "../dist-electron",
       "buildResources": "build"
@@ -53,6 +54,7 @@
       "shortcutName": "Chatbot Enterprise"
     },
     "nsis": {
+      "artifactName": "Chatbot-Enterprise-Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "perMachine": true,
       "allowElevation": true,

@@ -62,19 +62,6 @@ export default function AdminPage() {
     finally { setLoadingAudit(false); }
   };
 
-  const triggerProcess = async () => {
-    try {
-      const res = await fetch("/api/jobs/process", {
-        method: "POST",
-        headers: { "x-job-secret": "internal-job-secret" },
-      });
-      const data = await res.json() as { processed: boolean };
-      alert(data.processed ? "یک کار پردازش شد" : "صف پردازش خالی است");
-    } catch {
-      alert("خطا در اجرای کار");
-    }
-  };
-
   if (!user?.isAdmin) return null;
 
   const TABS = [
@@ -261,22 +248,11 @@ export default function AdminPage() {
             <h2 className="text-white font-semibold">مدیریت کارهای پردازش</h2>
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 space-y-4">
               <div>
-                <h3 className="text-white text-sm font-medium mb-2">پردازش دستی</h3>
-                <p className="text-slate-400 text-sm mb-3">
-                  اسناد بارگذاری‌شده برای پردازش در صف هستند.
-                  برای پردازش فوری دکمه زیر را کلیک کنید.
-                </p>
-                <button
-                  onClick={triggerProcess}
-                  className="bg-blue-600 hover:bg-blue-500 text-white text-sm px-4 py-2 rounded-lg transition-colors"
-                >
-                  ▶ پردازش کار بعدی
-                </button>
-              </div>
-              <hr className="border-slate-700" />
-              <div>
-                <p className="text-slate-400 text-xs">
-                  ⚠️ در محیط Production، از یک Cron Job هر ۳۰ ثانیه برای پردازش خودکار استفاده کنید.
+                <h3 className="text-white text-sm font-medium mb-2">پردازش خودکار</h3>
+                <p className="text-slate-400 text-sm">
+                  اسناد بارگذاری‌شده و درخواست‌های بازسازی شاخص به‌صورت
+                  خودکار توسط پردازندهٔ پس‌زمینه (هر ۲ ثانیه بررسی می‌شود)
+                  پردازش می‌شوند؛ نیازی به اقدام دستی نیست.
                 </p>
               </div>
             </div>

@@ -1,24 +1,37 @@
-# Downloads the Windows prerequisites bundled into the installer's prerequisites/ folder.
+# Bootstrap for download-prerequisites-impl.ps1.
+# Same pattern as download-models.ps1: tiny parse-safe wrapper that reports
+# failures via a `::error::` annotation and the Step Summary.
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $PSScriptRoot
-New-Item -ItemType Directory -Force -Path "$Root\prerequisites" | Out-Null
 
-$files = @{
-  "vc_redist.x64.exe" = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-  "MicrosoftEdgeWebView2Setup.exe" = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-}
-foreach ($k in $files.Keys) {
-    $dest = Join-Path "$Root\prerequisites" $k
-    if (Test-Path $dest) { Write-Host "exists: $k"; continue }
-    Write-Host "downloading $k..."
-    Invoke-WebRequest -Uri $files[$k] -OutFile $dest -UseBasicParsing
+function _Summary_Write($Lines) {
+    Write-Host ($Lines -join "`n")
+    if (-not $env:GITHUB_STEP_SUMMARY) { return }
+    try {
+        Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $Lines -Encoding UTF8
+    } catch {
+        Write-Host "step-summary write failed: $($_.Exception.Message)"
+    }
 }
 
-# Verify the models step actually succeeded. In the CI workflows this script
-# runs last, so throwing here fails the step (otherwise a failed model
-# download would be silently masked by this script's exit code).
-if (-not (Test-Path "$Root\.models-download-ok")) {
-    throw "Model download did not complete (missing .models-download-ok). Run scripts\download-models.ps1 and check its output."
+function _Annotation_Error($Text) {
+    $one = ($Text -replace "\r?\n", " | ")
+    if ($one.Length -gt 900) { $one = $one.Substring(0, 900) }
+    Write-Host "::error::download-prerequisites: $one"
 }
 
-Write-Host "Prerequisites ready." -ForegroundColor Green
+try {
+    if (-not (Test-Path -LiteralPath "$PSScriptRoot\download-prerequisites-impl.ps1")) {
+        throw "download-prerequisites-impl.ps1 not found next to download-prerequisites.ps1"
+    }
+    . "$PSScriptRoot\download-prerequisites-impl.ps1"
+} catch {
+    _Annotation_Error $_.Exception.ToString()
+    _Summary_Write @(
+        "## download-prerequisites.ps1 FAILED",
+        "",
+        "``````text",
+        $_.Exception.ToString(),
+        "``````"
+    )
+    throw
+}

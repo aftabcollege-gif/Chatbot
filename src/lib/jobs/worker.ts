@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { processingJobs } from "@/db/schema";
 import { processDocumentJob } from "@/lib/documents/pipeline";
 import { processExperienceJob } from "@/lib/experiences/pipeline";
+import { processReindexJob } from "@/lib/rag/reindex";
 import { updateJobStatus } from "@/lib/jobs/queue";
 
 const POLL_INTERVAL_MS = 2000;
@@ -38,6 +39,12 @@ async function runJob(job: typeof processingJobs.$inferSelect): Promise<void> {
       await processDocumentJob(job.id, job.resourceId);
     } else if (job.type === "experience_ingest") {
       await processExperienceJob(job.id, job.resourceId);
+    } else if (job.type === "reindex_all") {
+      const scope =
+        job.payload?.scope === "documents" || job.payload?.scope === "experiences"
+          ? (job.payload.scope as "documents" | "experiences")
+          : "all";
+      await processReindexJob(job.id, job.organizationId, scope);
     } else {
       throw new Error(`Unknown job type: ${job.type}`);
     }
