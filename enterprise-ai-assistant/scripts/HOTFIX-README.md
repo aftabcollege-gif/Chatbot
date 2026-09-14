@@ -55,8 +55,22 @@ powershell -ExecutionPolicy Bypass -File apply-hotfix.ps1 -Revert
 
 ## روش ۲ — دستی (اگر اسکریپت اجرا نشد)
 
-برنامه را ببندید، بعد فایل `config\default.yaml` را با Notepad باز کنید و
-این چهار مقدار را عوض کنید:
+> 🔴 **مهم‌ترین نکتهٔ این راهنما:** دو نسخه از `default.yaml` روی سیستم شما وجود دارد:
+>
+> ```
+> {app}\config\default.yaml            <- نسخهٔ مستقل
+> {app}\backend\config\default.yaml    <- این یکی خوانده می‌شود ✅
+> ```
+>
+> چون `backend-server.exe` داخل پوشهٔ `backend` است و کد ابتدا کنار خودِ
+> exe دنبال `config\default.yaml` می‌گردد، **نسخهٔ داخل `backend` برنده است**.
+> اگر فقط نسخهٔ اول را عوض کنید، هیچ اتفاقی نمی‌افتد.
+>
+> ساده‌ترین کار: **هر دو** را یکسان تغییر دهید. همین موضوع برای
+> `system-prompt.txt` هم صادق است.
+
+برنامه را ببندید، بعد فایل `default.yaml` را (هر دو نسخه) با Notepad باز کنید
+و این چهار مقدار را عوض کنید:
 
 ```yaml
 llm:

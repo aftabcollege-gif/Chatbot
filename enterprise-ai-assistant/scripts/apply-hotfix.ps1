@@ -85,6 +85,21 @@ Find the folder that contains 'config\default.yaml' (it also contains the
     exit 1
 }
 
+# IMPORTANT: there is more than one copy of config\default.yaml.
+#
+# The PyInstaller spec bundles ../config INTO the onedir output, so the
+# installer lays down BOTH:
+#     {app}\config\default.yaml           (standalone copy)
+#     {app}\backend\config\default.yaml   (bundled next to backend-server.exe)
+#
+# When frozen, Config._app_root() returns the folder holding the executable,
+# and _load_yaml() tries "<root>\config\default.yaml" FIRST. backend-server.exe
+# lives in {app}\backend, so the BACKEND copy is the one actually read.
+# Patching only the top-level copy silently does nothing, so patch them all.
+$ConfigFiles = @(Get-ChildItem -Path $InstallDir -Recurse -Filter "default.yaml" `
+                    -ErrorAction SilentlyContinue |
+                 Where-Object { $_.DirectoryName -match '\\config$' } |
+                 Select-Object -ExpandProperty FullName)
 $ConfigFile  = Join-Path $InstallDir "config\default.yaml"
 $LlmDir      = Join-Path $InstallDir "llm"
 $RealExe     = Join-Path $LlmDir "llama-server.exe"
@@ -95,9 +110,19 @@ $BackupDir   = Join-Path $InstallDir "hotfix-backup"
 Write-Step "Install directory"
 Write-Ok   $InstallDir
 
-if (-not (Test-Path $ConfigFile)) {
-    Write-Host "config\default.yaml not found under $InstallDir" -ForegroundColor Red
+if ($ConfigFiles.Count -eq 0) {
+    Write-Host "No config\default.yaml found under $InstallDir" -ForegroundColor Red
     exit 1
+}
+
+Write-Step "Config files found ($($ConfigFiles.Count))"
+foreach ($c in $ConfigFiles) {
+    $rel = $c.Substring($InstallDir.Length).TrimStart('\')
+    if ($c -match '\\backend\\config\\') {
+        Write-Ok "$rel   <- this is the one the backend reads"
+    } else {
+        Write-Ok $rel
+    }
 }
 
 # --------------------------------------------------------------------------- #
@@ -120,11 +145,34 @@ if ($running) {
 # --------------------------------------------------------------------------- #
 if ($Revert) {
     Write-Step "Reverting the hotfix"
-    if (Test-Path (Join-Path $BackupDir "default.yaml")) {
-        Copy-Item (Join-Path $BackupDir "default.yaml") $ConfigFile -Force
-        Write-Ok "config\default.yaml restored"
+
+    # Restore each backed-up config to the exact path it came from.
+    $manifest = Join-Path $BackupDir "manifest.txt"
+    if (Test-Path $manifest) {
+        foreach ($line in Get-Content $manifest) {
+            $parts = $line -split '\|', 2
+            if ($parts.Count -ne 2) { continue }
+            $src = Join-Path $BackupDir "default.yaml.$($parts[0])"
+            if (Test-Path $src) {
+                Copy-Item $src $parts[1] -Force
+                Write-Ok "restored $($parts[1])"
+            }
+        }
     } else {
         Write-Warn "no config backup found; leaving current config in place"
+    }
+
+    $pmanifest = Join-Path $BackupDir "manifest-prompt.txt"
+    if (Test-Path $pmanifest) {
+        foreach ($line in Get-Content $pmanifest) {
+            $parts = $line -split '\|', 2
+            if ($parts.Count -ne 2) { continue }
+            $src = Join-Path $BackupDir "system-prompt.txt.$($parts[0])"
+            if (Test-Path $src) {
+                Copy-Item $src $parts[1] -Force
+                Write-Ok "restored $($parts[1])"
+            }
+        }
     }
     if (Test-Path $BackupExe) {
         Remove-Item $RealExe -Force -ErrorAction SilentlyContinue
@@ -142,8 +190,15 @@ if ($Revert) {
 # --------------------------------------------------------------------------- #
 Write-Step "Backing up original files"
 New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
-if (-not (Test-Path (Join-Path $BackupDir "default.yaml"))) {
-    Copy-Item $ConfigFile (Join-Path $BackupDir "default.yaml") -Force
+$i = 0
+foreach ($cfg in $ConfigFiles) {
+    $i++
+    $dest = Join-Path $BackupDir "default.yaml.$i"
+    if (-not (Test-Path $dest)) {
+        Copy-Item $cfg $dest -Force
+        # Remember where each backup came from so -Revert can restore it.
+        Add-Content -Path (Join-Path $BackupDir "manifest.txt") -Value "$i|$cfg"
+    }
 }
 Write-Ok "backup -> $BackupDir"
 
@@ -163,8 +218,6 @@ Write-Ok "backup -> $BackupDir"
 # --------------------------------------------------------------------------- #
 Write-Step "Patching config\default.yaml"
 
-$yaml = Get-Content $ConfigFile -Raw -Encoding UTF8
-
 function Set-YamlScalar {
     param($Text, $Section, $Key, $Value)
     # Replace "  key: value" only inside the given top-level section.
@@ -177,30 +230,40 @@ function Set-YamlScalar {
     return $Text
 }
 
-$before = $yaml
+$patchedAny = $false
+foreach ($cfg in $ConfigFiles) {
+    $yaml   = Get-Content $cfg -Raw -Encoding UTF8
+    $before = $yaml
 
-# Temperature 0.1 makes sampling almost greedy. Combined with a disabled
-# repeat penalty that is exactly the condition where a small model locks
-# into a loop. Raising it is the one anti-loop lever available purely from
-# config, and it works even if the engine patch below cannot be applied.
-$yaml = Set-YamlScalar $yaml 'llm'      'temperature' '0.3'
-# Output reservation: must fit inside the 2048-token per-slot window
-# (--ctx-size 4096 split across --parallel 2) alongside the prompt.
-$yaml = Set-YamlScalar $yaml 'llm'      'max_tokens' '700'
-# Fewer, higher-quality chunks: 5 x 512 words could not fit in 2048 tokens.
-$yaml = Set-YamlScalar $yaml 'reranker' 'top_k'      '2'
-# Keep history small so it cannot crowd out the sources.
-$yaml = Set-YamlScalar $yaml 'rag'      'chat_history_max_tokens' '200'
+    # Temperature 0.1 makes sampling almost greedy. Combined with a disabled
+    # repeat penalty that is exactly the condition where a small model locks
+    # into a loop. Raising it is the one anti-loop lever available purely from
+    # config, and it works even if the engine patch below cannot be applied.
+    $yaml = Set-YamlScalar $yaml 'llm'      'temperature' '0.3'
+    # Output reservation: must fit inside the per-slot window alongside the
+    # prompt (the shim below restores the full 4096 by forcing --parallel 1).
+    $yaml = Set-YamlScalar $yaml 'llm'      'max_tokens' '700'
+    # Fewer, higher-quality chunks: 5 x 512 words could not fit in the window.
+    $yaml = Set-YamlScalar $yaml 'reranker' 'top_k'      '2'
+    # Keep history small so it cannot crowd out the sources.
+    $yaml = Set-YamlScalar $yaml 'rag'      'chat_history_max_tokens' '200'
 
-if ($yaml -ne $before) {
-    # Write UTF-8 without BOM (PyYAML handles BOM poorly on some builds).
-    [System.IO.File]::WriteAllText($ConfigFile, $yaml, (New-Object System.Text.UTF8Encoding $false))
+    $rel = $cfg.Substring($InstallDir.Length).TrimStart('\')
+    if ($yaml -ne $before) {
+        # Write UTF-8 without BOM (PyYAML handles BOM poorly on some builds).
+        [System.IO.File]::WriteAllText($cfg, $yaml, (New-Object System.Text.UTF8Encoding $false))
+        Write-Ok "patched $rel"
+        $patchedAny = $true
+    } else {
+        Write-Warn "already patched (or unexpected format): $rel"
+    }
+}
+
+if ($patchedAny) {
     Write-Ok "llm.temperature = 0.3   (was 0.1 - main anti-loop lever)"
     Write-Ok "llm.max_tokens  = 700   (was 2048 - prompt did not fit)"
     Write-Ok "reranker.top_k  = 2     (was 5 - fewer, better sources)"
     Write-Ok "rag.chat_history_max_tokens = 200"
-} else {
-    Write-Warn "config already patched (or unexpected format) - skipped"
 }
 
 # --------------------------------------------------------------------------- #
@@ -300,15 +363,16 @@ class Shim {
 # 7. Tighten the system prompt (read fresh on every request)
 # --------------------------------------------------------------------------- #
 Write-Step "Tightening the system prompt"
-$PromptFile = Join-Path $InstallDir "config\system-prompt.txt"
-if (Test-Path $PromptFile) {
-    if (-not (Test-Path (Join-Path $BackupDir "system-prompt.txt"))) {
-        Copy-Item $PromptFile (Join-Path $BackupDir "system-prompt.txt") -Force
-    }
-    $prompt = Get-Content $PromptFile -Raw -Encoding UTF8
-    $marker = "هرگز یک عبارت یا جمله را تکرار نکن"
-    if ($prompt -notmatch [regex]::Escape($marker)) {
-        $extra = @"
+
+# Same multi-copy situation as default.yaml: the backend reads the copy that
+# sits next to backend-server.exe. This file is re-read on every request, so
+# the change takes effect without a restart.
+$PromptFiles = @(Get-ChildItem -Path $InstallDir -Recurse -Filter "system-prompt.txt" `
+                    -ErrorAction SilentlyContinue |
+                 Select-Object -ExpandProperty FullName)
+
+$marker = "هرگز یک عبارت یا جمله را تکرار نکن"
+$extra = @"
 
 قواعد ضد تکرار (مهم):
 - هرگز یک عبارت یا جمله را تکرار نکن. هر جمله باید اطلاعات تازه اضافه کند.
@@ -316,13 +380,27 @@ if (Test-Path $PromptFile) {
 - وقتی پاسخ کامل شد، بلافاصله متوقف شو و چیزی اضافه ننویس.
 - اگر اطلاعات کافی در منابع نیست، فقط یک جمله بنویس و تمام کن.
 "@
-        [System.IO.File]::WriteAllText($PromptFile, $prompt + $extra, (New-Object System.Text.UTF8Encoding $false))
-        Write-Ok "anti-repetition instructions appended"
-    } else {
-        Write-Warn "already tightened - skipped"
-    }
-} else {
+
+if ($PromptFiles.Count -eq 0) {
     Write-Warn "system-prompt.txt not found - skipped"
+} else {
+    $j = 0
+    foreach ($pf in $PromptFiles) {
+        $j++
+        $bak = Join-Path $BackupDir "system-prompt.txt.$j"
+        if (-not (Test-Path $bak)) {
+            Copy-Item $pf $bak -Force
+            Add-Content -Path (Join-Path $BackupDir "manifest-prompt.txt") -Value "$j|$pf"
+        }
+        $prompt = Get-Content $pf -Raw -Encoding UTF8
+        $rel = $pf.Substring($InstallDir.Length).TrimStart('\')
+        if ($prompt -notmatch [regex]::Escape($marker)) {
+            [System.IO.File]::WriteAllText($pf, $prompt + $extra, (New-Object System.Text.UTF8Encoding $false))
+            Write-Ok "patched $rel"
+        } else {
+            Write-Warn "already tightened: $rel"
+        }
+    }
 }
 
 # --------------------------------------------------------------------------- #
