@@ -61,6 +61,26 @@ def tokenize(text: str) -> List[str]:
 
 _PERSIAN_RANGE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB8A-\uFCF2\uFE70-\uFEFC]")
 
+# High-frequency Persian function words that dilute BM25/FTS ranking.
+# We deliberately keep interrogatives (چرا, چه, چگونه, کجا, کی, چطور, ...) and
+# content words; only the most common grammatical words are stripped.
+_PERSIAN_STOPWORDS = frozenset(
+    """
+    از به در با بر برای بی بدون را که و یا نه
+    ها می ای
+    این آن او ما شما وی هم نیز حتی همان همین هنوز
+    آن‌ها آنها این‌ها اینها آنان ایشانشان
+    است هست بود باشد شده شود کرد
+    روی زیر بالا پشت جلو پیش
+    با بر
+    the a an of to in on at for and or but is are was were be been being
+    """.split()
+)
+
+
+def remove_stopwords(tokens: List[str]) -> List[str]:
+    return [t for t in tokens if t and t not in _PERSIAN_STOPWORDS]
+
 
 def is_persian(text: str) -> bool:
     if not text:

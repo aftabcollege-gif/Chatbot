@@ -4,9 +4,10 @@ Hybrid retrieval:
   1. Vector search (sqlite-vec) on document chunks and knowledge items.
   2. Full-text search (FTS5 / BM25) on the same content.
   3. Permission / scope filtering.
-  4. Reciprocal Rank Fusion (RRF) merge.
+  4. Reciprocal Rank Fusion (RRF) merge (preserving ranked order from both).
   5. Cross-encoder / lexical rerank.
-  6. Context assembly + streaming answer.
+  6. Neighbor chunk expansion (so answers that span adjacent chunks are kept).
+  7. Context assembly (respecting configured token budget) + streaming answer.
 """
 from __future__ import annotations
 
@@ -20,7 +21,13 @@ from core.config import settings
 from services.embedding_service import get_embedding_service
 from services.reranker_service import get_reranker_service
 from services import llm_service
-from utils.persian import detect_language, normalize_persian, tokenize
+from utils.persian import (
+    approximate_tokens,
+    detect_language,
+    normalize_persian,
+    remove_stopwords,
+    tokenize,
+)
 
 
 @dataclass
@@ -39,6 +46,8 @@ class RetrievedChunk:
     organization_id: Optional[str]
     score: float = 0.0
     rank_positions: List[int] = field(default_factory=list)
+    distance: Optional[float] = None
+    chunk_index: Optional[int] = None
 
     def is_visible_to(self, user: Dict[str, Any]) -> bool:
         if user.get("is_superadmin"):
@@ -62,7 +71,9 @@ def _vec_search(
 ) -> List[Dict[str, Any]]:
     conn = db.get_conn()
     blob = get_embedding_service().to_blob(query_vec)
-    # Parameter binding for vec0 MATCH uses a blob and a k value.
+    # sqlite-vec returns results in ascending distance order (closest first).
+    # We also request the distance column explicitly so we can preserve order
+    # after the follow-up IN(...) join.
     sql = f"""
         SELECT {id_col} AS hit_id, distance
         FROM {table}
@@ -76,14 +87,37 @@ def _vec_search(
         return []
 
 
+def _sanitize_fts_token(t: str) -> str:
+    # FTS5 treats " : * ^ and several others specially. Strip them from tokens
+    # we build ourselves so a query like "سلام*" doesn't raise a syntax error.
+    return "".join(ch for ch in t if ch.isalnum() or ch == "_")
+
+
+def _build_fts_query(query: str) -> str:
+    toks = remove_stopwords(tokenize(query))
+    if not toks:
+        toks = tokenize(query)
+    clean = [_sanitize_fts_token(t) for t in toks]
+    clean = [t for t in clean if t and len(t) > 0]
+    clean = sorted(set(clean), key=lambda t: (-len(t), t))
+    if not clean:
+        # Nothing useful to search on; fall back to a non-empty placeholder.
+        return "پاسخ"
+    # Cap to 30 tokens to keep the query performant and avoid FTS5 parser limits.
+    return " OR ".join(clean[:30])[:1000]
+
+
 def _fts_chunks(query: str, k: int, filters: str, params: List[Any]) -> List[Dict[str, Any]]:
     conn = db.get_conn()
-    match_q = " OR ".join(tokenize(query))[:1000] or query
-    # Visibility/ownership/department live on the documents table; chunks carry
-    # organization_id for partitioning but inherit the rest from the document.
+    # Build an FTS query that:
+    #   - drops Persian/English stopwords so high-frequency function words
+    #     don't pollute the match;
+    #   - sanitizes FTS special characters to avoid parse errors;
+    #   - joins tokens with OR for high recall; reranking narrows later.
+    match_q = _build_fts_query(query)
     sql = f"""
-        SELECT c.id, c.document_id, c.content, c.content_normalized, c.heading,
-               c.section, c.page_number, c.organization_id,
+        SELECT c.id, c.document_id, c.chunk_index, c.content, c.content_normalized,
+               c.heading, c.section, c.page_number, c.organization_id,
                d.title AS doc_title, d.visibility, d.owner_id,
                d.department_id,
                bm25(chunks_fts) AS rank_score
@@ -102,10 +136,16 @@ def _fts_chunks(query: str, k: int, filters: str, params: List[Any]) -> List[Dic
 
 def _fts_knowledge(query: str, k: int, filters: str, params: List[Any]) -> List[Dict[str, Any]]:
     conn = db.get_conn()
-    match_q = " OR ".join(tokenize(query))[:1000] or query
+    match_q = _build_fts_query(query)
+    # IMPORTANT: we must MATCH the fts table on all indexed columns (title,
+    # problem_description, action_taken, lesson_learned, suggestion). The
+    # previous version only selected lesson_learned as "content", which
+    # silently dropped matches on title/problem/action and was the main
+    # reason knowledge-base lookups felt inaccurate.
     sql = f"""
-        SELECT ki.id, ki.title, ki.lesson_learned AS content, ki.visibility,
-               ki.owner_id, ki.department_id, ki.organization_id,
+        SELECT ki.id, ki.title, ki.problem_description, ki.action_taken,
+               ki.result, ki.lesson_learned, ki.suggestion,
+               ki.visibility, ki.owner_id, ki.department_id, ki.organization_id,
                bm25(knowledge_fts) AS rank_score
         FROM knowledge_fts
         JOIN knowledge_items ki ON ki.rowid = knowledge_fts.rowid
@@ -113,8 +153,22 @@ def _fts_knowledge(query: str, k: int, filters: str, params: List[Any]) -> List[
         ORDER BY rank_score LIMIT ?
     """
     try:
-        return [dict(r) for r in conn.execute(sql, [match_q, *params, k]).fetchall()]
-    except Exception:
+        rows = [dict(r) for r in conn.execute(sql, [match_q, *params, k]).fetchall()]
+        # Concatenate all indexed fields so downstream assembly has the full
+        # matching context available, not just the lesson_learned field.
+        for r in rows:
+            parts = [
+                r.get("title"),
+                r.get("problem_description"),
+                r.get("action_taken"),
+                r.get("result"),
+                r.get("lesson_learned"),
+                r.get("suggestion"),
+            ]
+            r["content"] = "\n".join(p for p in parts if p)
+        return rows
+    except Exception as exc:
+        print(f"[rag] fts_knowledge error: {exc}")
         return []
 
 
@@ -134,7 +188,6 @@ def _scope_clause(
     elif scope == "folder" and scope_id:
         clauses.append("(c.document_id IN (SELECT id FROM documents WHERE folder_id=?))")
         params.append(scope_id)
-    # document/department/private scopes reference the documents table.
     if scope == "department":
         target = scope_id or dept
         if target:
@@ -143,9 +196,7 @@ def _scope_clause(
     elif scope == "private":
         clauses.append("(d.owner_id = ?)")
         params.append(uid)
-    # "all" => add implicit visibility filter below.
 
-    # Visibility / access filter (non-superadmin).
     if not user.get("is_superadmin"):
         clauses.append(
             "(d.visibility='public' OR d.owner_id=? "
@@ -192,6 +243,28 @@ def _rrf_merge(*ranked_lists: List[List[Any]], k: int = 60) -> Dict[Any, float]:
     return scores
 
 
+def _reorder_vec_results(
+    hits: List[Dict[str, Any]], candidate_rows: List[Dict[str, Any]], id_field: str
+) -> List[Dict[str, Any]]:
+    """Reorder DB-fetched rows to match vector-search hit order (closest first).
+
+    sqlite-vec returns hits ordered by ascending distance, but the subsequent
+    ``SELECT ... WHERE id IN (...)`` join does not preserve that order — which
+    used to destroy RRF's position-based weighting. Here we re-apply the
+    vec ordering by the original hit list.
+    """
+    order = {h["id"]: (pos, h["distance"]) for pos, h in enumerate(hits)}
+    indexed = {r[id_field]: r for r in candidate_rows}
+    ordered: List[Dict[str, Any]] = []
+    for h in hits:
+        r = indexed.get(h["id"])
+        if r is not None:
+            d = dict(r)
+            d["_distance"] = h["distance"]
+            ordered.append(d)
+    return ordered
+
+
 def retrieve(
     question: str,
     user: Dict[str, Any],
@@ -201,6 +274,8 @@ def retrieve(
 ) -> List[RetrievedChunk]:
     start = time.time()
     top_k = top_k or settings.rag_retrieval_top_k
+    # Fetch more candidates initially, then trim after rerank.
+    fetch_k = max(top_k, 25)
     embedder = get_embedding_service()
     q_vec = embedder.embed_one(normalize_persian(question))
 
@@ -210,7 +285,7 @@ def retrieve(
     candidates: Dict[str, RetrievedChunk] = {}
 
     # 1) FTS on chunks.
-    fts_chunks = _fts_chunks(question, top_k, chunk_filter.replace("c.", "c."), chunk_params)
+    fts_chunks = _fts_chunks(question, fetch_k, chunk_filter, chunk_params)
     fts_keys: List[Any] = []
     for i, row in enumerate(fts_chunks):
         key = ("doc", row["id"])
@@ -229,26 +304,19 @@ def retrieve(
                 owner_id=row["owner_id"],
                 department_id=row["department_id"],
                 organization_id=row["organization_id"],
+                chunk_index=row.get("chunk_index"),
             )
 
-    # 2) Vector search on chunks (requires sqlite-vec). We need to filter by
-    #    visibility; vec0 only supports the embedding MATCH plus k, so we fetch
-    #    a larger pool and post-filter.
+    # 2) Vector search on chunks — preserve vec distance order.
+    vec_keys: List[Any] = []
     if db.vec_available():
-        vec_rows = _vec_search(
-            q_vec,
-            "chunks_vec",
-            "chunk_id",
-            top_k * 3,
-            "",
-            [],
-        )
-        if vec_rows:
-            ids = [v["id"] for v in vec_rows]
+        vec_hits = _vec_search(q_vec, "chunks_vec", "chunk_id", fetch_k * 3, "", [])
+        if vec_hits:
+            ids = [v["id"] for v in vec_hits]
             placeholders = ",".join("?" for _ in ids)
             rows = db.query_all(
-                f"""SELECT c.id, c.document_id, c.content, c.heading, c.section,
-                           c.page_number, c.organization_id,
+                f"""SELECT c.id, c.document_id, c.chunk_index, c.content, c.heading,
+                           c.section, c.page_number, c.organization_id,
                            d.title AS doc_title, d.visibility, d.owner_id,
                            d.department_id
                     FROM document_chunks c
@@ -256,10 +324,8 @@ def retrieve(
                     WHERE c.id IN ({placeholders}) AND d.status='READY'""",
                 ids,
             )
-            vec_keys: List[Any] = []
-            for pos, r in enumerate(rows):
-                d = dict(r)
-                # Apply scope/visibility filter in-process.
+            ordered = _reorder_vec_results(vec_hits, [dict(r) for r in rows], "id")
+            for pos, d in enumerate(ordered):
                 temp = RetrievedChunk(
                     source_type="document",
                     source_id=d["document_id"],
@@ -273,6 +339,8 @@ def retrieve(
                     owner_id=d["owner_id"],
                     department_id=d["department_id"],
                     organization_id=d["organization_id"],
+                    distance=d.get("_distance"),
+                    chunk_index=d.get("chunk_index"),
                 )
                 if not temp.is_visible_to(user):
                     continue
@@ -293,13 +361,9 @@ def retrieve(
                     )
                     temp.title = doc["title"] if doc else "سند"
                     candidates[key] = temp
-        else:
-            vec_keys = []
-    else:
-        vec_keys = []
 
-    # 3) Knowledge base FTS.
-    know_rows = _fts_knowledge(question, top_k, know_filter, know_params)
+    # 3) Knowledge base FTS (now covers all indexed columns).
+    know_rows = _fts_knowledge(question, fetch_k, know_filter, know_params)
     know_keys: List[Any] = []
     for row in know_rows:
         key = ("know", row["id"])
@@ -320,21 +384,36 @@ def retrieve(
                 organization_id=row["organization_id"],
             )
 
-    # 4) Vector search knowledge.
+    # 4) Vector search knowledge — again, preserve vec distance order.
+    vk_keys: List[Any] = []
     if db.vec_available():
-        vec_know = _vec_search(q_vec, "knowledge_vec", "knowledge_id", top_k * 2, "", [])
-        vk_keys: List[Any] = []
+        vec_know = _vec_search(q_vec, "knowledge_vec", "knowledge_id", fetch_k * 2, "", [])
         if vec_know:
             ids = [v["id"] for v in vec_know]
             placeholders = ",".join("?" for _ in ids)
             rows = db.query_all(
-                f"""SELECT id, title, lesson_learned AS content, visibility, owner_id,
+                f"""SELECT id, title, problem_description, action_taken, result,
+                           lesson_learned, suggestion, visibility, owner_id,
                            department_id, organization_id, status
                     FROM knowledge_items WHERE id IN ({placeholders})""",
                 ids,
             )
+            # Build concatenated content.
+            row_dicts = []
             for r in rows:
                 d = dict(r)
+                parts = [
+                    d.get("title"),
+                    d.get("problem_description"),
+                    d.get("action_taken"),
+                    d.get("result"),
+                    d.get("lesson_learned"),
+                    d.get("suggestion"),
+                ]
+                d["content"] = "\n".join(p for p in parts if p)
+                row_dicts.append(d)
+            ordered = _reorder_vec_results(vec_know, row_dicts, "id")
+            for d in ordered:
                 if d["status"] != "PUBLISHED":
                     continue
                 temp = RetrievedChunk(
@@ -350,6 +429,7 @@ def retrieve(
                     owner_id=d["owner_id"],
                     department_id=d["department_id"],
                     organization_id=d["organization_id"],
+                    distance=d.get("_distance"),
                 )
                 if not temp.is_visible_to(user):
                     continue
@@ -357,8 +437,6 @@ def retrieve(
                 vk_keys.append(key)
                 if key not in candidates:
                     candidates[key] = temp
-    else:
-        vk_keys = []
 
     # 5) RRF merge.
     rrf = _rrf_merge(fts_keys, vec_keys, know_keys, vk_keys)
@@ -369,33 +447,138 @@ def retrieve(
             continue
         chunk.score = round(score, 5)
         merged.append(chunk)
-        if len(merged) >= max(top_k, settings.rag_retrieval_top_k):
+        if len(merged) >= max(fetch_k, settings.rag_retrieval_top_k):
             break
 
-    # 6) Rerank.
+    # 6) Neighbor expansion: for each top-ranked document chunk, also pull in
+    # the previous/next chunk of the same document so that answers that span
+    # chunk boundaries can be synthesized.
+    _expand_neighbors(merged, user)
+
+    # 7) Rerank. Feed more candidates than final top_k so reranker can pick
+    # the best even if lexical overlap was slightly lower.
+    rerank_k = max(settings.reranker_top_k, 8)
     if merged:
         reranker = get_reranker_service()
-        docs = [f"{c.title}\n{c.content}" for c in merged]
-        reranked = reranker.rerank(question, docs, top_k=settings.reranker_top_k)
+        docs = [f"{c.title}\n{c.heading or ''}\n{c.content}" for c in merged]
+        reranked = reranker.rerank(question, docs, top_k=min(rerank_k, len(merged)))
         final = []
+        seen_keys = set()
         for idx, score in reranked:
+            key = (merged[idx].source_type, merged[idx].chunk_id or merged[idx].source_id)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             merged[idx].score = round(float(score), 4)
             final.append(merged[idx])
         merged = final
 
     elapsed = (time.time() - start) * 1000
+    print(
+        f"[rag] retrieve q={question!r} candidates={len(candidates)} "
+        f"returned={len(merged)} elapsed_ms={elapsed:.1f}"
+    )
     return merged
 
 
-def assemble_context(chunks: List[RetrievedChunk]) -> str:
+def _expand_neighbors(merged: List[RetrievedChunk], user: Dict[str, Any]) -> None:
+    """Append adjacent document chunks so cross-chunk answers have context.
+
+    Mutates ``merged`` in-place; duplicates (already-present chunks) are
+    skipped. Expansion only applies to document chunks that have a
+    ``chunk_index``; knowledge items don't need it.
+    """
+    if not merged:
+        return
+    existing = {
+        (c.source_type, c.chunk_id or c.source_id) for c in merged
+    }
+    additions: List[RetrievedChunk] = []
+    # Only expand the top-N scored chunks to avoid flooding context.
+    for c in merged[:6]:
+        if c.source_type != "document" or c.chunk_index is None or not c.chunk_id:
+            continue
+        prev_row = db.query_one(
+            """SELECT c.id, c.document_id, c.chunk_index, c.content, c.heading,
+                      c.section, c.page_number, c.organization_id,
+                      d.title AS doc_title, d.visibility, d.owner_id, d.department_id
+               FROM document_chunks c JOIN documents d ON d.id=c.document_id
+               WHERE c.document_id=? AND c.chunk_index=? AND d.status='READY'""",
+            (c.source_id, c.chunk_index - 1),
+        )
+        next_row = db.query_one(
+            """SELECT c.id, c.document_id, c.chunk_index, c.content, c.heading,
+                      c.section, c.page_number, c.organization_id,
+                      d.title AS doc_title, d.visibility, d.owner_id, d.department_id
+               FROM document_chunks c JOIN documents d ON d.id=c.document_id
+               WHERE c.document_id=? AND c.chunk_index=? AND d.status='READY'""",
+            (c.source_id, c.chunk_index + 1),
+        )
+        for row in (prev_row, next_row):
+            if not row:
+                continue
+            d = dict(row)
+            key = ("doc", d["id"])
+            if key in existing:
+                continue
+            # Same visibility as parent (it comes from the same document).
+            rc = RetrievedChunk(
+                source_type="document",
+                source_id=d["document_id"],
+                chunk_id=d["id"],
+                title=d.get("doc_title") or c.title,
+                content=d["content"],
+                page_number=d["page_number"],
+                section=d["section"],
+                heading=d["heading"],
+                visibility=d["visibility"],
+                owner_id=d["owner_id"],
+                department_id=d["department_id"],
+                organization_id=d["organization_id"],
+                chunk_index=d["chunk_index"],
+                score=c.score * 0.9,  # slightly lower than the anchor
+            )
+            if not rc.is_visible_to(user):
+                continue
+            additions.append(rc)
+            existing.add(key)
+    merged.extend(additions)
+
+
+def assemble_context(chunks: List[RetrievedChunk], max_tokens: Optional[int] = None) -> str:
+    """Assemble chunks into a labeled context, trimming to a token budget.
+
+    Without this cap, 5 chunks of ~512 words each plus system prompt +
+    history + generation can exceed the LLM's ctx-size (4096 by default).
+    Overflowing the context window is a major cause of the model "missing"
+    sources and producing poor combined answers.
+    """
+    budget = max_tokens or settings.rag_context_max_tokens
     lines: List[str] = []
+    used = 0
     for i, c in enumerate(chunks, start=1):
         title = c.title or "منبع"
-        ref = f"[{i}] ({title}"
+        header_parts = [f"[{i}] {title}"]
+        if c.heading:
+            header_parts.append(str(c.heading))
         if c.page_number:
-            ref += f"، صفحه {c.page_number}"
-        ref += ")"
-        lines.append(f"{ref}\n{c.content}")
+            header_parts.append(f"صفحه {c.page_number}")
+        header = " | ".join(header_parts)
+        body = c.content.strip()
+        # Estimate tokens for this candidate block; truncate body if needed.
+        header_tokens = approximate_tokens(header)
+        remaining = budget - used - header_tokens - 8  # 8 for separators/marker
+        if remaining <= 0:
+            break
+        body_tokens = approximate_tokens(body)
+        if body_tokens > remaining > 0:
+            words = body.split()
+            # Trim to fit. ~1 word ≈ 1 token for Persian/English mix.
+            body = " ".join(words[: max(32, remaining)]).strip() + "…"
+        lines.append(f"{header}\n{body}")
+        used += header_tokens + approximate_tokens(body) + 8
+        if used >= budget:
+            break
     return "\n\n".join(lines)
 
 
@@ -442,9 +625,13 @@ async def answer_stream(
     yield {"type": "confidence", "score": confidence}
 
     system_prompt = _load_system_prompt(language)
-    context = assemble_context(chunks)
+    # Respect token budget when building the prompt so we never overflow the
+    # model's ctx-size (otherwise the LLM server silently truncates from the
+    # front, dropping sources — exactly the "can't combine sources" symptom).
+    context = assemble_context(chunks, max_tokens=settings.rag_context_max_tokens)
     messages = llm_service.build_messages(
-        system_prompt, history, question, context, language
+        system_prompt, history, question, context, language,
+        max_tokens=settings.rag_context_max_tokens,
     )
 
     llm = llm_service.get_llm_service()
@@ -455,14 +642,14 @@ async def answer_stream(
                 used_llm = True
                 yield {"type": "token", "content": token}
         except Exception as exc:
+            print(f"[rag] LLM stream error: {exc}")
             yield {"type": "error", "message": f"LLM stream error: {exc}"}
             used_llm = False
 
     if not used_llm:
-        # The extractive generator needs full chunk content (the UI-facing
-        # ``sources`` payload only carries a short snippet).
         full_sources = [
-            {"content": c.content, "title": c.title, "page_number": c.page_number}
+            {"content": c.content, "title": c.title, "page_number": c.page_number,
+             "heading": c.heading}
             for c in chunks
         ]
         async for token in llm_service.extractive_stream(
@@ -483,9 +670,13 @@ def _load_system_prompt(language: str) -> str:
     if language.startswith("fa"):
         return (
             "تو دستیار هوشمند سازمانی هستی. پاسخ‌ها را دقیق، کوتاه و بر پایه منابع "
-            "ارائه‌شده بنویس و به شماره منبع استناد کن. اگر منبع کافی نیست، شفاف بگو."
+            "ارائه‌شده بنویس و به شماره منبع استناد کن. اگر منبع کافی نیست، شفاف بگو. "
+            "اگر پاسخ نیاز به ترکیب اطلاعات چند منبع دارد، همه منابع مرتبط را با هم "
+            "ترکیب کن و شماره‌های همه آن‌ها را در استناد بیاور."
         )
     return (
         "You are an enterprise assistant. Answer concisely and accurately based "
-        "only on the provided sources and cite source numbers."
+        "only on the provided sources and cite source numbers. When the answer "
+        "must combine information across multiple sources, synthesize them and "
+        "cite every relevant source number."
     )

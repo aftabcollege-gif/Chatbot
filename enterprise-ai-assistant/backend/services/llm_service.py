@@ -18,7 +18,12 @@ from typing import AsyncIterator, Dict, List, Optional
 import httpx
 
 from core.config import settings
-from utils.persian import normalize_persian, tokenize, truncate_words
+from utils.persian import (
+    approximate_tokens,
+    normalize_persian,
+    remove_stopwords,
+    tokenize,
+)
 
 
 class LLMSession:
@@ -77,19 +82,50 @@ class LLMSession:
 # --------------------------------------------------------------------------- #
 # Offline extractive fallback
 # --------------------------------------------------------------------------- #
-def _best_snippet(query_tokens: List[str], text: str) -> tuple[str, float]:
-    sentences = re.split(r"(?<=[.!?؟。])\s+|\n+", text)
-    best, best_score = "", 0.0
+
+# Better Persian/Arabic sentence splitting: break on sentence-terminating
+# punctuation and on newlines, but keep the punctuation with the sentence.
+_SENT_SPLIT = re.compile(r"(?<=[.!?؟。؟!])\s+|\n+")
+_PERSIAN_SENT = re.compile(r"[.!?؟。]")
+
+
+def _split_sentences(text: str) -> List[str]:
+    # Normalize newlines, then split on sentence boundaries.
+    text = re.sub(r"\s*\n\s*", " \n ", text)
+    sents = [s.strip() for s in _SENT_SPLIT.split(text) if s and s.strip()]
+    return sents
+
+
+def _best_snippets(query_tokens: List[str], text: str, max_snippets: int = 2) -> List[tuple]:
+    """Return up to ``max_snippets`` (score, sentence) pairs for a source."""
     qset = set(query_tokens)
+    if not qset:
+        return []
+    sentences = _split_sentences(text)
+    scored = []
     for sent in sentences:
         stoks = set(tokenize(sent))
         if not stoks:
             continue
         overlap = len(qset & stoks)
-        score = overlap / (len(qset) + 1e-9)
-        if score > best_score:
-            best, best_score = sent.strip(), score
-    return best, best_score
+        if overlap == 0:
+            continue
+        # Jaccard-like score, biased toward higher overlap / shorter sents.
+        score = overlap / (len(qset) + len(stoks) - overlap + 1e-9)
+        # Boost consecutive bigram hits (heuristic for phrasal match).
+        scored.append((score, sent.strip()))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    # De-duplicate near-identical snippets.
+    out, seen = [], set()
+    for score, sent in scored:
+        key = re.sub(r"\s+", " ", sent)[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((score, sent))
+        if len(out) >= max_snippets:
+            break
+    return out
 
 
 async def extractive_stream(
@@ -98,9 +134,20 @@ async def extractive_stream(
     history: List[Dict[str, str]],
     language: str = "fa",
 ) -> AsyncIterator[str]:
-    """Yield an answer composed from retrieved sources, word-by-word."""
-    q_tokens = tokenize(normalize_persian(question))
+    """Yield an answer composed from retrieved sources, word-by-word.
+
+    Compared to the earlier version this one:
+      - selects up to 2 sentences per source instead of 1;
+      - ranks sources by cumulative score (so multiple weak hits don't beat
+        one strong one);
+      - emits an explicit "I didn't find enough info" message when all scores
+        are near zero;
+      - properly splits Persian sentences on ؟ ! . ء and newlines.
+    """
     fa = language.startswith("fa")
+    q_tokens = remove_stopwords(tokenize(normalize_persian(question)))
+    if not q_tokens:
+        q_tokens = tokenize(normalize_persian(question))
 
     if not sources:
         noinfo = (
@@ -113,24 +160,56 @@ async def extractive_stream(
             yield word + " "
         return
 
-    # Pick the most relevant snippets.
-    ranked = []
+    # Per-source selection & scoring.
+    per_source: List[tuple] = []  # (total_score, snippets, src)
     for src in sources:
-        snippet, score = _best_snippet(q_tokens, src.get("content", ""))
-        ranked.append((score, snippet, src))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    ranked = [r for r in ranked if r[1]][:3]
+        snippets = _best_snippets(q_tokens, src.get("content", "") or "", max_snippets=2)
+        if not snippets:
+            continue
+        total = sum(s[0] for s in snippets)
+        per_source.append((total, snippets, src))
+    per_source.sort(key=lambda x: x[0], reverse=True)
+
+    # If best source score is very low, be honest about lack of evidence.
+    if not per_source or per_source[0][0] < 0.08:
+        noinfo = (
+            "منابع بازیابی‌شده ارتباط کمی با پرسش دارند. ممکن است اطلاعات موردنظر "
+            "در اسناد بارگذاری‌شده وجود نداشته باشد، یا نیاز است سند دقیق‌تری را "
+            "بارگذاری کنید. در زیر بخش‌هایی که بیشترین شباهت را داشته‌اند آمده است:\n\n"
+            if fa
+            else "The retrieved sources have low relevance to your question. "
+                 "Below are the closest passages found:\n\n"
+        )
+        for word in noinfo.split():
+            yield word + " "
+
+    # Limit to the top 4 sources to keep the answer concise but comprehensive.
+    per_source = per_source[:4]
 
     intro = (
-        f"بر اساس {len(ranked)} منبع بازیابی‌شده، " if fa else f"Based on {len(ranked)} retrieved source(s), "
+        f"بر اساس {len(per_source)} منبع مرتبط:\n\n"
+        if fa
+        else f"Based on {len(per_source)} relevant source(s):\n\n"
     )
     yield intro
 
-    for i, (_, snippet, src) in enumerate(ranked, start=1):
-        marker = f"[{i}] "
-        text = marker + truncate_words(snippet, 60) + " "
-        for word in text.split():
-            yield word + " "
+    for i, (_, snippets, src) in enumerate(per_source, start=1):
+        title = src.get("title") or ("منبع" if fa else "Source")
+        header = f"[{i}] {title}"
+        if src.get("page_number"):
+            header += f" (صفحه {src['page_number']})"
+        header += ":\n"
+        for w in header.split():
+            yield w + " "
+        yield "\n"
+        for _, snip in snippets:
+            # Cap to ~70 words per snippet to avoid runaway answers.
+            words = snip.split()
+            if len(words) > 70:
+                snip = " ".join(words[:70]) + "…"
+            for w in (snip + " ").split():
+                yield w + " "
+        yield "\n"
 
 
 def build_messages(
@@ -139,26 +218,73 @@ def build_messages(
     question: str,
     context: str,
     language: str = "fa",
+    max_tokens: Optional[int] = None,
 ) -> List[Dict[str, str]]:
-    ctx_instruction = (
-        "پاسخ خود را تنها بر اساس متن منبع زیر بنویس و به شماره منبع استناد کن. "
-        "اگر اطلاعات کافی نیست، صریحاً بگو."
-        if language.startswith("fa")
-        else "Answer strictly using the source context below and cite the source numbers. "
-        "If the context is insufficient, say so explicitly."
-    )
-    user_block = f"{ctx_instruction}\n\nمنابع:\n{context}\n\nپرسش: {question}"
-    messages = [{"role": "system", "content": system_prompt}]
-    # Trim history to stay within budget.
-    budget = settings.rag_history_max_tokens
-    acc = 0
+    """Build the LLM message list while respecting the model's context budget.
+
+    The previous implementation did not cap the size of the assembled context,
+    which combined with system + history + generation frequently overflowed
+    the default 4096-token ctx-size. llama.cpp silently truncates from the
+    front of the prompt when overflow happens, which meant the model often
+    lost the sources entirely -> poor answers / failure to combine sources.
+    """
+    ctx_budget = max_tokens or settings.rag_context_max_tokens
+    if language.startswith("fa"):
+        ctx_instruction = (
+            "پاسخ خود را تنها بر اساس متن «منابع» زیر بنویس و هر ادعا را به شماره "
+            "منبع میان کروشه استناد کن، برای نمونه [۱] یا [۱، ۳]. اگر پاسخ نیاز به "
+            "ترکیب اطلاعات چند منبع دارد، همه منابع مرتبط را با هم ترکیب کن. اگر "
+            "اطلاعات کافی نیست، صریحاً بگو و از حدس زدن بپرهیز."
+        )
+    else:
+        ctx_instruction = (
+            "Answer strictly using the 'Sources' context below and cite each claim "
+            "with source numbers in brackets, e.g. [1] or [1, 3]. When the answer "
+            "requires combining information across multiple sources, synthesize "
+            "them and cite all relevant sources. If the context is insufficient, "
+            "say so explicitly — do not guess."
+        )
+
+    system_content = system_prompt
+    system_tokens = approximate_tokens(system_content)
+
+    # Reserve tokens for instruction + question + generation headroom.
+    instr_tokens = approximate_tokens(ctx_instruction)
+    q_tokens = approximate_tokens(question)
+    gen_reserve = settings.llm_max_tokens + 256  # output + separators
+    total_ctx = settings.llm_context_size
+
+    # Budget for (history + sources).
+    available = total_ctx - system_tokens - instr_tokens - q_tokens - gen_reserve
+    history_budget = int(available * 0.25)  # 25% to history
+    sources_budget = int(available * 0.75)
+    if sources_budget < 256:
+        sources_budget = 256
+        history_budget = max(0, available - sources_budget)
+
+    # Trim history from the oldest end.
     trimmed: List[Dict[str, str]] = []
+    acc = 0
     for msg in reversed(history[-10:]):
-        size = len(msg.get("content", "").split())
-        if acc + size > budget:
+        size = approximate_tokens(msg.get("content", "")) + 4
+        if acc + size > history_budget:
             break
         trimmed.insert(0, msg)
         acc += size
+
+    # Trim context: the caller has already applied its own cap via
+    # assemble_context(), but we enforce a hard cap here too so we never
+    # overshoot the model's ctx-size even if config values are mis-tuned.
+    ctx_words = context.split()
+    ctx_tok = approximate_tokens(context)
+    if ctx_tok > sources_budget:
+        # Roughly proportional trim.
+        keep = max(64, int(len(ctx_words) * (sources_budget / max(1, ctx_tok))))
+        context = " ".join(ctx_words[:keep]) + "…"
+
+    user_block = f"{ctx_instruction}\n\nSources / منابع:\n{context}\n\nQuestion / پرسش: {question}"
+
+    messages = [{"role": "system", "content": system_content}]
     messages.extend(trimmed)
     messages.append({"role": "user", "content": user_block})
     return messages
