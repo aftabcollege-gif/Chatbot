@@ -302,17 +302,22 @@ def main(argv: list[str] | None = None) -> int:
     APP_PORT = args.port
     prepare_sys_path()
 
-    try:  # keep progress lines visible even when output is redirected
-        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
-        sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    print(BANNER, flush=True)
+    # Persian output must survive a Windows console *and* a redirected pipe
+    # (the CI smoke test, `> log.txt`): with the cp1252 default a single
+    # Persian character aborts the process with UnicodeEncodeError.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(  # type: ignore[attr-defined]
+                encoding="utf-8", errors="replace", line_buffering=True
+            )
+        except Exception:
+            pass
     if sys.platform == "win32":
         try:  # make Persian output readable in the classic console
             subprocess.run(["chcp", "65001"], shell=True, capture_output=True, timeout=5)
         except Exception:
             pass
+    print(BANNER, flush=True)
 
     from mini_repair import data_dir, find_installations, repair_database, repair_installation
 

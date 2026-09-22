@@ -87,6 +87,7 @@ jobs:
           Get-FileHash $exe.FullName -Algorithm SHA256 | Tee-Object -FilePath dist\SHA256SUMS.txt | Format-List
 
       - name: Smoke test the EXE (repair + serve)
+        id: smoke
         shell: pwsh
         continue-on-error: true
         run: |
@@ -144,6 +145,23 @@ jobs:
             enterprise-ai-assistant/dist/serve-stdout.txt
             enterprise-ai-assistant/dist/serve-stderr.txt
           retention-days: 30
+
+      - name: Publish the smoke report on failure (diagnostics)
+        if: steps.smoke.outcome == 'failure'
+        shell: pwsh
+        run: |
+          # Keeps the report readable even when the Actions log stream is not
+          # reachable from the maintainer's network: the file is committed to
+          # the branch the build came from.
+          New-Item -ItemType Directory -Force -Path ..\.ci | Out-Null
+          Copy-Item dist\smoke-report.txt ..\.ci\mini-smoke-report.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\serve-stderr.txt ..\.ci\mini-serve-stderr.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\serve-stdout.txt ..\.ci\mini-serve-stdout.txt -Force -ErrorAction SilentlyContinue
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ..\.ci
+          git commit -q -m "ci: mini smoke diagnostics [skip ci]"
+          git push origin "HEAD:${{ github.ref_name }}"
 
       - name: Enforce the smoke test before publishing
         shell: pwsh
