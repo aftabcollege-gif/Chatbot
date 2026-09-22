@@ -37,6 +37,11 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    // Standalone sub-projects with their own package.json / toolchain —
+    // they are built by their own CI and must not break the root build.
+    "enterprise-ai-assistant/**",
+    "portable_bild/**",
+    "portable_setup/**"
   ]
 }

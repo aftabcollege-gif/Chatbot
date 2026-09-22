@@ -2,9 +2,14 @@ import { eq, and } from "drizzle-orm";
 import { db } from "@/db";
 import { knowledgeChunks, EMBEDDING_DIMENSIONS } from "@/db/schema";
 import { getEmbeddingProvider } from "@/lib/ai/provider-factory";
+import { normalizeForIndex } from "@/lib/text/normalize";
+import { invalidateVectorIndex } from "@/lib/rag/vector-index";
 import type { TextChunk } from "@/lib/documents/chunk";
 
 const EMBEDDING_BATCH_SIZE = 8;
+
+/** Warn once per process (the portable console is user-visible). */
+let ingestWarnedNoEmbedding = false;
 
 export interface IngestChunkSource {
   organizationId: string;
@@ -41,7 +46,12 @@ export async function reindexChunks(
     } catch (error) {
       // No local embedding model installed — index the chunks with zero
       // vectors so they remain retrievable via keyword (tsvector) search.
-      console.error("[RAG] Local embedding model unavailable — indexing without vectors:", error);
+      if (!ingestWarnedNoEmbedding) {
+        ingestWarnedNoEmbedding = true;
+        console.warn(
+          `[RAG] Local embedding model unavailable — indexing without vectors (keyword search still works): ${(error as Error)?.message ?? error}`,
+        );
+      }
       embeddings = batch.map(() => ({
         vector: new Array(EMBEDDING_DIMENSIONS).fill(0),
         dimensions: EMBEDDING_DIMENSIONS,
@@ -59,6 +69,10 @@ export async function reindexChunks(
         page: chunk.page,
         chunkIndex: chunk.chunkIndex,
         content: chunk.content,
+        // Normalized copy used by the generated content_tsv column — the
+        // raw content alone is NOT tokenizable for Persian (ZWNJ stays
+        // inside words). See src/lib/text/normalize.ts.
+        contentNorm: normalizeForIndex(chunk.content),
         tokenCount: chunk.tokenCount,
         embedding: embeddings[idx].vector,
       })),
@@ -68,11 +82,21 @@ export async function reindexChunks(
     await onProgress?.(inserted, chunks.length);
   }
 
+  // Chunk set changed — the cached portable vector index is stale.
+  invalidateVectorIndex(source.organizationId);
   return inserted;
 }
 
 export async function deleteChunksForSource(sourceType: "document" | "experience", sourceId: string): Promise<void> {
+  const rows = await db
+    .select({ organizationId: knowledgeChunks.organizationId })
+    .from(knowledgeChunks)
+    .where(and(eq(knowledgeChunks.sourceType, sourceType), eq(knowledgeChunks.sourceId, sourceId)))
+    .limit(1);
+
   await db
     .delete(knowledgeChunks)
     .where(and(eq(knowledgeChunks.sourceType, sourceType), eq(knowledgeChunks.sourceId, sourceId)));
+
+  if (rows[0]) invalidateVectorIndex(rows[0].organizationId);
 }

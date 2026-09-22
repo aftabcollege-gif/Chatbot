@@ -6,6 +6,7 @@ import { getCurrentUser, hasPermission } from "@/lib/auth-server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { logEvent } from "@/lib/audit";
 import { deleteStoredFile } from "@/lib/documents/storage";
+import { deleteChunksForSource } from "@/lib/rag/ingest";
 
 export async function GET(
   request: NextRequest,
@@ -48,9 +49,9 @@ export async function DELETE(
     return NextResponse.json({ error: "دسترسی مجاز نیست" }, { status: 403 });
   }
 
-  // Soft-delete: mark as deleted so it immediately disappears from retrieval/RAG
-  // (document_chunks are removed via cascade delete below to guarantee it never
-  // resurfaces in search/RAG — directive §48).
+  // Remove the document's index chunks FIRST (no cascade FK exists on
+  // source_id) so it can never resurface in search/RAG, then the row itself.
+  await deleteChunksForSource("document", doc.id);
   await db.delete(documents).where(eq(documents.id, id));
   await deleteStoredFile(doc.storagePath);
 

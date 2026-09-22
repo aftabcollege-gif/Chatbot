@@ -82,19 +82,17 @@ class _OnnxEmbedder:
         enc = self.tokenizer.encode_batch(
             [normalize_persian(t) for t in texts]
         )
-        input_ids = np.array(
-            [e.ids[: self.max_length] for e in enc], dtype=np.int64
-        )
-        attention_mask = np.array(
-            [e.attention_mask[: self.max_length] for e in enc], dtype=np.int64
-        )
-        # Pad to common length.
-        max_len = max(len(r) for r in input_ids)
+        seqs = [e.ids[: self.max_length] for e in enc]
+        masks = [e.attention_mask[: self.max_length] for e in enc]
+        # Pad to a common length BEFORE building the tensors. Building a numpy
+        # array directly from variable-length rows raises "inhomogeneous shape
+        # after 1 dimensions" (rows = batch size, here 32).
+        max_len = max((len(s) for s in seqs), default=1)
         ids = np.zeros((len(texts), max_len), dtype=np.int64)
         mask = np.zeros((len(texts), max_len), dtype=np.int64)
-        for i, row in enumerate(input_ids):
-            ids[i, : len(row)] = row
-            mask[i, : len(row)] = attention_mask[i]
+        for i, (s, m) in enumerate(zip(seqs, masks)):
+            ids[i, : len(s)] = s
+            mask[i, : len(m)] = m
         outputs = self.session.run(
             None, {self.input_name: ids, "attention_mask": mask}
         )
