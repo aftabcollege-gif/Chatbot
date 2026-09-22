@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List
@@ -130,16 +131,42 @@ class Config:
     def theme(self) -> str:
         return self.get("app.theme", "dark")
 
+    def _asset_roots(self) -> List[Path]:
+        """Directories that may contain bundled assets.
+
+        Covers every layout we ship: frozen-onedir (``<app>/backend`` with
+        ``<app>`` as the sibling root), Inno Setup (``{app}\backend`` +
+        ``{app}\frontend\dist``), Electron (``resources\backend``), a plain
+        source checkout, and any extra directory handed to us through
+        ``EAI_ASSETS_DIR`` (used by the standalone mini launcher).
+        """
+        roots: List[Path] = [self.root, self.root.parent]
+        extra = os.environ.get("EAI_ASSETS_DIR")
+        if extra:
+            for part in extra.split(os.pathsep):
+                part = part.strip().strip('"')
+                if part:
+                    roots.append(Path(part))
+        if getattr(sys, "frozen", False):
+            roots.append(Path(sys.executable).resolve().parent)
+        roots.append(Path.cwd())
+        seen: List[Path] = []
+        for r in roots:
+            if r not in seen:
+                seen.append(r)
+        return seen
+
     def _resolve_asset(self, rel: str) -> Path:
         """Resolve a shared asset path under the app root, with a packaged fallback.
 
         When frozen by PyInstaller the backend runs from ``<resources>/backend``,
-        while the Electron shell stages shared assets (frontend build, models,
+        while the shell stages shared assets (frontend build, models, config,
         extensions, llm binaries) as siblings directly under ``<resources>``.
         Check the backend directory first, then its parent, so both dev and
         packaged layouts resolve correctly.
         """
-        for candidate in (self.root / rel, self.root.parent / rel):
+        for root in self._asset_roots():
+            candidate = root / rel
             if candidate.exists():
                 return candidate
         return self.root / rel
@@ -258,10 +285,16 @@ class Config:
 
     @property
     def system_prompt_path(self) -> Path:
+        override = os.environ.get("EAI_SYSTEM_PROMPT")
+        if override:
+            return Path(override)
         return self._resolve_asset("config/system-prompt.txt")
 
     @property
     def frontend_dist(self) -> Path:
+        override = os.environ.get("EAI_FRONTEND_DIST")
+        if override:
+            return Path(override)
         return self._resolve_asset("frontend/dist")
 
 

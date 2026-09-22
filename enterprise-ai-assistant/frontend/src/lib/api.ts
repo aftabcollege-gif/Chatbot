@@ -18,8 +18,25 @@ export function clearTokens() {
   localStorage.removeItem(REFRESH_KEY);
 }
 
+/**
+ * When the UI is served by the embedded backend (browser, Electron, or the
+ * portable mini launcher) a relative ``/api`` is correct.  Tauri loads the
+ * bundle from the ``tauri://localhost`` custom protocol, where a relative
+ * request would never reach the Python backend — there we must target the
+ * loopback API explicitly.
+ */
+export const API_BASE = (() => {
+  const envBase = (import.meta as any).env?.VITE_API_BASE as string | undefined;
+  if (envBase) return envBase;
+  const proto = typeof window !== "undefined" ? window.location.protocol : "http:";
+  if (proto === "tauri:" || proto === "file:" || proto === "app:") {
+    return "http://127.0.0.1:8741/api";
+  }
+  return "/api";
+})();
+
 export const api: AxiosInstance = axios.create({
-  baseURL: "/api",
+  baseURL: API_BASE,
   timeout: 60000,
 });
 

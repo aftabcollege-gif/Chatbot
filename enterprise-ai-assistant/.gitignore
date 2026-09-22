@@ -31,3 +31,5 @@ dist-installer/
 *.db-wal
 *.db-shm
 storage/
+tools/mini/extensions/*.dll
+tools/mini/extensions/*.so

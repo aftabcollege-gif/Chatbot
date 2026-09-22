@@ -61,6 +61,10 @@ Source: "..\models\ocr\*"; DestDir: "{app}\models\ocr"; Flags: ignoreversion rec
 
 ; --- Frontend is served by the backend (already bundled into PyInstaller one-dir) ---
 Source: "..\frontend\dist\*"; DestDir: "{app}\frontend\dist"; Flags: ignoreversion recursesubdirs
+; Belt and braces: older backends resolved frontend/dist relative to the backend
+; executable, so stage a copy there too (a few hundred KB) — this is what made
+; the packaged app show a blank white window.
+Source: "..\frontend\dist\*"; DestDir: "{app}\backend\frontend\dist"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
 ; --- Config ---
 Source: "..\config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs
