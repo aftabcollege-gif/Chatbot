@@ -86,24 +86,71 @@ jobs:
           Write-Host ("EXE size: {0:N1} MB" -f ($exe.Length / 1MB))
           Get-FileHash $exe.FullName -Algorithm SHA256 | Tee-Object -FilePath dist\SHA256SUMS.txt | Format-List
 
-      - name: Smoke test the EXE (repair-only, then serve-only)
+      - name: Smoke test the EXE (repair + serve)
         shell: pwsh
+        continue-on-error: true
         run: |
-          $env:XDG_DATA_HOME = "$env:TEMP\eai-smoke"
-          # repair step only: must create the database + print credentials, exit 0
-          & dist\Chatbot-Enterprise-Mini.exe --repair-only --serve-only
-          if ($LASTEXITCODE -ne 0) { throw "mini EXE repair-only run failed ($LASTEXITCODE)" }
-          $creds = Join-Path $env:APPDATA "EnterpriseAI\ADMIN-CREDENTIALS.txt"
-          if (!(Test-Path $creds)) { throw "credentials file was not created" }
-          Get-Content $creds | Select-Object -First 6
+          $report = "dist\smoke-report.txt"
+          "== Chatbot Enterprise Mini — smoke test ==" | Out-File $report -Encoding utf8
+          "exe size: $((Get-Item dist\Chatbot-Enterprise-Mini.exe).Length)" | Out-File $report -Append
+
+          # 1) repair-only run: must create the database + credentials, exit 0
+          $out  = & dist\Chatbot-Enterprise-Mini.exe --repair-only --serve-only 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          "---- repair-only exit code: $code ----" | Out-File $report -Append
+          $out | Out-File $report -Append
+          "LASTEXITCODE_REPAIR=$code" | Tee-Object -FilePath dist\LASTEXITCODE.txt
+
+          # 2) serve run: the application itself must answer on /api/health
+          $proc = Start-Process -FilePath "dist\Chatbot-Enterprise-Mini.exe" `
+            -ArgumentList "--serve-only", "--no-browser", "--port", "8799" -PassThru `
+            -RedirectStandardOutput "dist\serve-stdout.txt" -RedirectStandardError "dist\serve-stderr.txt"
+          $ok = $false
+          for ($i = 0; $i -lt 45; $i++) {
+            try {
+              $r = Invoke-WebRequest "http://127.0.0.1:8799/api/health" -UseBasicParsing -TimeoutSec 3
+              $ok = $true
+              break
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if ($ok) {
+            "---- /api/health: $($r.StatusCode) $($r.Content)" | Out-File $report -Append
+          } else {
+            "---- /api/health: NO ANSWER after 90s" | Out-File $report -Append
+          }
+          try { Invoke-WebRequest "http://127.0.0.1:8799/api/setup/bootstrap-info" -UseBasicParsing -TimeoutSec 5 |
+                  Select-Object -ExpandProperty Content | Out-File $report -Append } catch {}
+          try { Stop-Process -Id $proc.Id -Force } catch {}
+          "---- serve stdout ----" | Out-File $report -Append
+          Get-Content dist\serve-stdout.txt -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-File $report -Append
+          "---- serve stderr ----" | Out-File $report -Append
+          Get-Content dist\serve-stderr.txt -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-File $report -Append
+          "---- APPDATA\EnterpriseAI ----" | Out-File $report -Append
+          Get-ChildItem -Recurse "$env:APPDATA\EnterpriseAI" -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName | Out-File $report -Append
+          if (Test-Path "$env:APPDATA\EnterpriseAI\ADMIN-CREDENTIALS.txt") {
+            Get-Content "$env:APPDATA\EnterpriseAI\ADMIN-CREDENTIALS.txt" | Select-Object -First 6 | Out-File $report -Append
+          }
+          Get-Content $report
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: Chatbot-Enterprise-Mini
           path: |
             enterprise-ai-assistant/dist/Chatbot-Enterprise-Mini.exe
             enterprise-ai-assistant/dist/SHA256SUMS.txt
+            enterprise-ai-assistant/dist/smoke-report.txt
+            enterprise-ai-assistant/dist/serve-stdout.txt
+            enterprise-ai-assistant/dist/serve-stderr.txt
           retention-days: 30
+
+      - name: Enforce the smoke test before publishing
+        shell: pwsh
+        run: |
+          $report = Get-Content dist\smoke-report.txt -Raw
+          if ($report -notmatch "repair-only exit code: 0") { throw "repair-only run failed:$report" }
+          if ($report -notmatch "/api/health: 200") { throw "the application did not answer /api/health:$report" }
 
       - name: Publish to the rolling release (stable download link)
         uses: softprops/action-gh-release@v2
