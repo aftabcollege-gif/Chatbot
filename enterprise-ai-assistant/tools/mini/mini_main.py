@@ -17,6 +17,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -77,6 +78,61 @@ def port_free(port: int, host: str = "127.0.0.1") -> bool:
         return False
     finally:
         sock.close()
+
+
+def is_admin() -> bool:
+    if sys.platform != "win32":
+        return os.geteuid() == 0 if hasattr(os, "geteuid") else False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_elevated(extra_args: list[str]) -> bool:
+    """Run this EXE again through UAC and wait for it to finish.
+
+    Repairing an application that lives in ``C:\Program Files`` requires
+    administrator rights; this keeps the "just double-click" experience while
+    still being able to write there (one UAC prompt).
+    """
+    report_file = Path(tempfile.gettempdir()) / "chatbot-mini-repair.txt"
+    try:
+        report_file.unlink()
+    except OSError:
+        pass
+    args = [*extra_args, "--repair-report", str(report_file)]
+    try:
+        import ctypes
+
+        # ShellExecuteW returns a value > 32 on success.
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, subprocess.list2cmdline(args), None, 1
+        )
+        if int(result) <= 32:
+            print("[!] درخواست دسترسی مدیر تأیید نشد؛ تعمیر نسخهٔ نصب‌شده انجام نمی‌شود.")
+            return False
+    except Exception as exc:
+        print(f"[!] اجرای مجدد با دسترسی مدیر ممکن نشد: {exc!r}")
+        return False
+
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        if report_file.is_file():
+            try:
+                print(report_file.read_text(encoding="utf-8").strip())
+            except OSError:
+                pass
+            try:
+                report_file.unlink()
+            except OSError:
+                pass
+            return True
+        time.sleep(1)
+    print("[!] پاسخ برنامهٔ با دسترسی مدیر دریافت نشد.")
+    return False
 
 
 def http_ok(url: str, timeout: float = 1.5) -> bool:
@@ -184,12 +240,59 @@ def open_browser_when_ready(url: str, timeout: float = 60.0) -> None:
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
+def _ask_with_timeout(question: str, seconds: int = 12) -> str:
+    """Read a line, but never block the launcher for longer than *seconds*."""
+    if not (sys.stdin and sys.stdin.isatty()):
+        return ""
+    print(question, end="", flush=True)
+    answer: list[str] = []
+
+    def _reader() -> None:
+        try:
+            answer.append(input())
+        except (EOFError, OSError):
+            answer.append("")
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    print("" if answer else "\n    (پاسخی داده نشد؛ ادامه می‌دهیم)")
+    return answer[0].strip() if answer else ""
+
+
+def _is_writable(path: Path) -> bool:
+    try:
+        probe = path / ".eai-write-test"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _print_actions(report: dict) -> None:
+    for level, message in report.get("actions", []):  # type: ignore[union-attr]
+        marker = {"ok": "[✓]", "warn": "[!]", "error": "[×]"}.get(str(level), "[·]")
+        print(f"    {marker} {message}")
+
+
+def _write_repair_report(report: dict, path: str | None) -> None:
+    if not path:
+        return
+    try:
+        lines = [f"{level}: {message}" for level, message in report.get("actions", [])]  # type: ignore[union-attr]
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=True, description="Chatbot Enterprise offline mini launcher")
     parser.add_argument("--repair-only", action="store_true", help="only repair the installed app, do not serve")
     parser.add_argument("--serve-only", action="store_true", help="skip the repair step")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser")
     parser.add_argument("--port", type=int, default=APP_PORT, help="port for the built-in server")
+    parser.add_argument("--repair-report", default=None, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -213,37 +316,79 @@ def main(argv: list[str] | None = None) -> int:
 
     from mini_repair import data_dir, find_installations, repair_database, repair_installation
 
-    installs = [] if args.serve_only else find_installations()
+    installs = [] if (args.serve_only and not args.repair_report) else find_installations()
     install = installs[0] if installs else None
 
     print("۱) بررسی نسخهٔ نصب‌شده ...")
+    if args.repair_report:
+        # Elevated helper run: repair only, report the result for the parent
+        # process, then exit so the parent can continue starting the server.
+        if install is None:
+            print("    [!] نسخهٔ نصب‌شده‌ای برای تعمیر پیدا نشد.")
+            _write_repair_report(
+                {"actions": [("warn", "نسخهٔ نصب‌شده‌ای برای تعمیر پیدا نشد")]}, args.repair_report
+            )
+        else:
+            print(f"    مسیر نصب: {install}")
+            report = repair_installation(install, log=print)
+            _print_actions(report)
+            _write_repair_report(report, args.repair_report)
+        print("تعمیر نسخهٔ نصب‌شده انجام شد.")
+        return 0
+
     if install is not None:
         print(f"    مسیر نصب: {install}")
-        report = repair_installation(install, log=print)
-        for level, message in report["actions"]:  # type: ignore[index]
-            marker = {"ok": "[✓]", "warn": "[!]", "error": "[×]"}.get(str(level), "[·]")
-            print(f"    {marker} {message}")
+        elevated_done = False
+        if not _is_writable(install) and sys.platform == "win32" and not is_admin():
+            print("    [!] برای تعمیر این مسیر دسترسی مدیر لازم است؛ درخواست UAC ...")
+            elevated_done = relaunch_elevated(["--repair-only", "--serve-only"])
+        if elevated_done:
+            print("    [✓] تعمیر نسخهٔ نصب‌شده با دسترسی مدیر انجام شد.")
+        else:
+            report = repair_installation(install, log=print)
+            _print_actions(report)
     else:
         print("    نسخهٔ نصب‌شده‌ای پیدا نشد (این برنامه به‌تنهایی کار می‌کند).")
 
     directory = data_dir()
     print(f"۲) تعمیر پایگاه داده و ساخت حساب مدیر  ({directory}) ...")
     try:
-        username, password, created = repair_database(directory, log=print)
+        result = repair_database(directory, log=print)
+        if not result["password"] and not result["created"]:
+            # An account with a password the user (supposedly) knows already
+            # exists: give a way out when that is not the case.
+            answer = _ask_with_timeout(
+                "    [؟] اگر رمز عبور فعلی را فراموش کرده‌اید عدد 2 و Enter را بزنید،\n"
+                "        در غیر این صورت فقط Enter بزنید (۱۲ ثانیه): "
+            )
+            if answer.strip() in {"2", "۲"}:
+                result = repair_database(directory, log=print, reset_password=True)
     except Exception as exc:
         print(f"    [×] خطا در تعمیر پایگاه داده: {exc!r}")
         return 2
 
-    print("")
-    print("================================================================")
-    print("   اطلاعات ورود (نام کاربری و رمز عبور مدیر)")
-    print(f"      نام کاربری : {username}")
-    print(f"      رمز عبور   : {password}")
-    print(f"      وضعیت      : {'حساب تازه ساخته شد' if created else 'رمز عبور بازنشانی شد'}")
-    print("================================================================")
-    print("   این اطلاعات در فایل ADMIN-CREDENTIALS.txt (در پوشهٔ APPDATA و روی")
-    print("   دسکتاپ) ذخیره شد. پس از نخستین ورود، رمز را از بخش «پروفایل» تغییر دهید.")
-    print("")
+    username, password = result["username"], result["password"]
+    if password:
+        print("")
+        print("================================================================")
+        print("   اطلاعات ورود (نام کاربری و رمز عبور مدیر)")
+        print(f"      نام کاربری : {username}")
+        print(f"      رمز عبور   : {password}")
+        if result["created"]:
+            status = "حساب تازه ساخته شد"
+        elif result.get("from_file"):
+            status = "همان رمز قبلی (فایل اطلاعات ورود) معتبر است"
+        else:
+            status = "رمز عبور بازنشانی شد"
+        print(f"      وضعیت      : {status}")
+        print("================================================================")
+        print("   این اطلاعات در فایل ADMIN-CREDENTIALS.txt (در پوشهٔ APPDATA و روی")
+        print("   دسکتاپ) ذخیره شد. پس از نخستین ورود، رمز را از بخش «پروفایل» تغییر دهید.")
+        print("")
+    else:
+        print("")
+        print(f"    [✓] حساب مدیر «{username}» فعال و آمادهٔ ورود است (رمز فعلی شما معتبر است).")
+        print("")
 
     if args.repair_only:
         print("تعمیر انجام شد. نسخهٔ نصب‌شده را از میان‌بر دسکتاپ اجرا کنید.")

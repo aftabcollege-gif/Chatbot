@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 APP_TITLES = ("Chatbot Enterprise", "EnterpriseAI", "دستیار هوشمند سازمانی")
 BACKEND_EXE_NAMES = ("backend-server.exe", "backend-server")
@@ -326,9 +326,9 @@ def repair_installation(install: Path, log=print) -> Dict[str, object]:
         linked = []
         for model_name in ("embedding", "reranker", "llm", "ocr"):
             src = models_src / model_name
-            target = backend / "models" / model_name
-            if not src.is_dir() or target.exists():
+            if not src.is_dir() or not any(src.iterdir()):
                 continue
+            target = backend / "models" / model_name
             # Never copy model folders (hundreds of megabytes); junction only.
             result = _link_or_copy_dir(src, target, allow_copy=False)
             if result != "failed":
@@ -344,10 +344,22 @@ def repair_installation(install: Path, log=print) -> Dict[str, object]:
 # --------------------------------------------------------------------------- #
 # Database / admin repair
 # --------------------------------------------------------------------------- #
-def repair_database(directory: Path, log=print) -> Tuple[str, str, bool]:
-    """Ensure the schema exists and a usable super-admin is present.
+def repair_database(
+    directory: Path,
+    log=print,
+    reset_password: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Ensure the schema exists and the super-admin account is usable.
 
-    Returns ``(username, password, created)``.
+    Returns ``{username, password, created, reset, from_file}``.
+
+    Password policy (the "initial login / admin credentials" problem):
+
+    * no super-admin yet  -> create one with a generated password;
+    * super-admin exists and a still-unused ``ADMIN-CREDENTIALS.txt`` is around
+      -> keep the account, reprint the password from that file (it is valid);
+    * ``reset_password=True`` (explicit user request / unknown password)
+      -> generate a fresh password.
     """
     from core import bootstrap  # bundled backend module
     from core.database import init_db
@@ -364,5 +376,36 @@ def repair_database(directory: Path, log=print) -> Tuple[str, str, bool]:
     except Exception as exc:  # pragma: no cover - defensive
         log(f"[!] init_db: {exc!r}")
 
+    has_admin = bootstrap.has_admin()
+    stored = bootstrap.bootstrap_info().get("credentials") or {}
+
+    if has_admin and reset_password is None and stored.get("username") and stored.get("password"):
+        # The account exists and its password was never used yet.
+        bootstrap.bootstrap_admin(reset_password=False)  # only unlock / activate
+        return {
+            "username": stored["username"],
+            "password": stored["password"],
+            "created": False,
+            "reset": False,
+            "from_file": True,
+        }
+
+    if has_admin and reset_password is None:
+        # Keep the password the user knows; just make sure it can log in.
+        result = bootstrap.bootstrap_admin(reset_password=False)
+        return {
+            "username": result["username"],
+            "password": "",
+            "created": False,
+            "reset": False,
+            "from_file": False,
+        }
+
     result = bootstrap.bootstrap_admin(reset_password=True)
-    return result["username"], result["password"] or "", result["created"]
+    return {
+        "username": result["username"],
+        "password": result["password"] or "",
+        "created": result["created"],
+        "reset": not result["created"],
+        "from_file": False,
+    }
