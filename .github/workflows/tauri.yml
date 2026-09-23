@@ -257,12 +257,23 @@ jobs:
 
       - name: Publish to the release (stable download link)
         if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: setup-latest
-          target_commitish: ${{ github.sha }}
-          fail_on_unmatched_files: false
-          files: |
-            enterprise-ai-assistant/dist-release/setup.exe
-            enterprise-ai-assistant/dist-release/EnterpriseAI.msi
-            enterprise-ai-assistant/dist-release/SHA256SUMS.txt
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # softprops/action-gh-release silently SKIPS a file when an asset with
+          # the same name already exists, which is why the release kept serving
+          # the old (broken) setup.exe.  The CLI with --clobber really replaces it.
+          $release = "setup-latest"
+          $assets = @()
+          if (Test-Path "dist-release\setup.exe") { $assets += "dist-release\setup.exe" }
+          if (Test-Path "dist-release\EnterpriseAI.msi") { $assets += "dist-release\EnterpriseAI.msi" }
+          if (Test-Path "dist-release\SHA256SUMS.txt") { $assets += "dist-release\SHA256SUMS.txt" }
+          if ($assets.Count -eq 0) { throw "nothing to publish" }
+          gh release view $release *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $release --title "setup.exe installer" --notes "EnterpriseAI Windows installer (offline)"
+          }
+          gh release upload $release $assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw "release upload failed ($LASTEXITCODE)" }
+          gh release view $release --json assets -q '.assets[] | "\(.name)  \(.size) bytes"'
