@@ -150,45 +150,70 @@ jobs:
           #   1) a plain run serves on the application's own port (8741);
           #   2) a second run while the port is busy must NOT move elsewhere,
           #      must NOT close the running copy and must exit with code 4.
+          $report = "dist\port-smoke-report.txt"
+          "== port policy smoke test ==" | Out-File $report -Encoding utf8
           $exe = "dist\Chatbot-Enterprise-Mini.exe"
+          "" | Out-File "dist\empty-stdin.txt" -Encoding ascii
+
+          # Start from a quiet machine: kill any leftover listener on 8741.
+          Get-NetTCPConnection -LocalPort 8741 -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object { try { "killing leftover pid $($_.OwningProcess)" | Out-File $report -Append
+                                   Stop-Process -Id $_.OwningProcess -Force } catch {} }
+          Start-Sleep -Seconds 2
+
+          # ---- 1) the default run must serve on 8741 -------------------------
           $first = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
+            -RedirectStandardInput "dist\empty-stdin.txt" `
             -RedirectStandardOutput "dist\port-first-stdout.txt" -RedirectStandardError "dist\port-first-stderr.txt"
+          "first instance pid: $($first.Id)" | Out-File $report -Append
 
           $ok = $false
           for ($i = 0; $i -lt 45; $i++) {
+            if ($first.HasExited) { "first instance exited early with $($first.ExitCode)" | Out-File $report -Append; break }
             try {
-              $r = Invoke-WebRequest "http://127.0.0.1:8741/api/health" -UseBasicParsing -TimeoutSec 3
+              Invoke-WebRequest "http://127.0.0.1:8741/api/health" -UseBasicParsing -TimeoutSec 3 | Out-Null
               $ok = $true
               break
             } catch { Start-Sleep -Seconds 2 }
           }
-          if (-not $ok) {
-            try { Stop-Process -Id $first.Id -Force } catch {}
-            Get-Content "dist\port-first-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 40
-            throw "the launcher did not serve the default port 8741"
-          }
-          Write-Host "default port 8741 answered /api/health"
+          "default port 8741 answered: $ok" | Out-File $report -Append
 
-          # Second run, no interactive console: the launcher must refuse to move.
-          $second = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
-            -RedirectStandardInput "NUL" `
-            -RedirectStandardOutput "dist\port-second-stdout.txt" -RedirectStandardError "dist\port-second-stderr.txt"
-          $null = $second.WaitForExit(180000)
-          $code = $second.ExitCode
-          Get-Content "dist\port-second-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 25
+          $moved = @()
+          $code = "n/a"
+          if ($ok) {
+            # ---- 2) a second run must refuse to move -------------------------
+            $second = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
+              -RedirectStandardInput "dist\empty-stdin.txt" `
+              -RedirectStandardOutput "dist\port-second-stdout.txt" -RedirectStandardError "dist\port-second-stderr.txt"
+            $exited = $second.WaitForExit(120000)
+            $code = if ($exited) { $second.ExitCode } else { "timeout" }
+            if (-not $exited) { try { Stop-Process -Id $second.Id -Force } catch {} }
+            "second instance exit code: $code" | Out-File $report -Append
 
-          $moved = $false
-          foreach ($port in 8751, 8752, 8753, 8742) {
-            try {
-              Invoke-WebRequest "http://127.0.0.1:$port/api/health" -UseBasicParsing -TimeoutSec 3 | Out-Null
-              $moved = $true
-              Write-Host "::error::the launcher silently served on port $port"
-            } catch {}
+            foreach ($port in 8751, 8752, 8753, 8742) {
+              $client = New-Object System.Net.Sockets.TcpClient
+              try {
+                $client.Connect("127.0.0.1", $port)
+                $moved += $port
+              } catch { } finally { $client.Dispose() }
+            }
+            "ports that silently appeared: $($moved -join ', ')" | Out-File $report -Append
           }
+
           try { Stop-Process -Id $first.Id -Force } catch {}
+          "---- first instance stdout ----" | Out-File $report -Append
+          Get-Content "dist\port-first-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Out-File $report -Append
+          "---- first instance stderr ----" | Out-File $report -Append
+          Get-Content "dist\port-first-stderr.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Out-File $report -Append
+          "---- second instance stdout ----" | Out-File $report -Append
+          Get-Content "dist\port-second-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-File $report -Append
+          "---- second instance stderr ----" | Out-File $report -Append
+          Get-Content "dist\port-second-stderr.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Out-File $report -Append
+          Get-Content $report
 
-          if ($moved) { throw "the port moved without the user's approval" }
-          if ($code -ne 4) { throw "a run with a busy port must exit with code 4 (got $code)" }
+          if ($moved.Count -gt 0) { throw "the port moved without the user's approval: $($moved -join ', ')" }
+          if (-not $ok) { throw "the default run did not serve on port 8741" }
+          if ("$code" -ne "4") { throw "a run with a busy port must exit with code 4 (got $code)" }
           Write-Host "port policy honoured: no silent port change, exit code 4"
 
       - uses: actions/upload-artifact@v4
@@ -201,6 +226,7 @@ jobs:
             enterprise-ai-assistant/dist/smoke-report.txt
             enterprise-ai-assistant/dist/serve-stdout.txt
             enterprise-ai-assistant/dist/serve-stderr.txt
+            enterprise-ai-assistant/dist/port-smoke-report.txt
             enterprise-ai-assistant/dist/port-first-stdout.txt
             enterprise-ai-assistant/dist/port-first-stderr.txt
             enterprise-ai-assistant/dist/port-second-stdout.txt
@@ -208,7 +234,7 @@ jobs:
           retention-days: 30
 
       - name: Publish the smoke report on failure (diagnostics)
-        if: steps.smoke.outcome == 'failure'
+        if: failure()
         shell: pwsh
         run: |
           # Keeps the report readable even when the Actions log stream is not
@@ -218,6 +244,12 @@ jobs:
           Copy-Item dist\smoke-report.txt ..\.ci\mini-smoke-report.txt -Force -ErrorAction SilentlyContinue
           Copy-Item dist\serve-stderr.txt ..\.ci\mini-serve-stderr.txt -Force -ErrorAction SilentlyContinue
           Copy-Item dist\serve-stdout.txt ..\.ci\mini-serve-stdout.txt -Force -ErrorAction SilentlyContinue
+          # port-policy diagnostics
+          Copy-Item dist\port-smoke-report.txt ..\.ci\mini-port-smoke-report.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-first-stdout.txt ..\.ci\mini-port-first-stdout.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-first-stderr.txt ..\.ci\mini-port-first-stderr.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-second-stdout.txt ..\.ci\mini-port-second-stdout.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-second-stderr.txt ..\.ci\mini-port-second-stderr.txt -Force -ErrorAction SilentlyContinue
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f ..\.ci
