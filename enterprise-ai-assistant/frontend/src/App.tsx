@@ -20,6 +20,7 @@ import { SettingsPage } from "@/pages/admin/settings";
 import { WebSourcesPage } from "@/pages/admin/web-sources";
 import { NotFoundPage } from "@/pages/not-found";
 import { useEffect, useState } from "react";
+import { API_BASE } from "@/lib/api";
 
 function Protected({ children, admin = false }: { children: React.ReactNode; admin?: boolean }) {
   const user = useAuth((s) => s.user);
@@ -33,16 +34,24 @@ function Protected({ children, admin = false }: { children: React.ReactNode; adm
 
 export default function App() {
   const user = useAuth((s) => s.user);
+  const location = useLocation();
   const [setupDone, setSetupDone] = useState<boolean | null>(null);
 
   useEffect(() => {
-    fetch("/api/setup/status")
+    fetch(`${API_BASE}/setup/status`)
       .then((r) => r.json())
-      .then((d) => setSetupDone(d.completed))
+      .then((d) => setSetupDone(Boolean(d.completed)))
       .catch(() => setSetupDone(true));
   }, [user]);
 
   if (setupDone === null) return null;
+
+  // First run: the wizard is the only useful screen.  Without this the app
+  // opened on a login page while no account existed — the "initial login"
+  // dead end users kept hitting in the packaged builds.
+  if (!setupDone && location.pathname !== "/setup" && !user) {
+    return <Navigate to="/setup" replace />;
+  }
 
   return (
     <Routes>

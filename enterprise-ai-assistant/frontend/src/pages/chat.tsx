@@ -153,6 +153,17 @@ export function ChatPage() {
                 }
                 return copy;
               });
+            } else if (ev.type === "query") {
+              // The assistant resolved this follow-up against the previous
+              // messages before searching the knowledge base.
+              setMessages((m) => {
+                const copy = [...m];
+                const last = copy[copy.length - 1];
+                if (last && last.role === "assistant") {
+                  copy[copy.length - 1] = { ...last, resolved_query: ev.query, resolved_method: ev.method };
+                }
+                return copy;
+              });
             } else if (ev.type === "error") {
               setMessages((m) => {
                 const copy = [...m];
@@ -328,6 +339,14 @@ function MessageBubble({ message }: { message: Message }) {
         >
           {message.content || (message.streaming ? <span className="typing-cursor" /> : "")}
         </div>
+        {!isUser && message.resolved_query && (
+          <div className="mt-2 text-[11px] text-muted-foreground flex items-start gap-1">
+            <Sparkles className="h-3 w-3 mt-0.5 shrink-0" />
+            <span>
+              پرسش با توجه به گفت‌وگو تکمیل شد: <span className="font-medium">{message.resolved_query}</span>
+            </span>
+          </div>
+        )}
         {!isUser && message.sources && message.sources.length > 0 && (
           <SourcesPanel sources={message.sources} />
         )}

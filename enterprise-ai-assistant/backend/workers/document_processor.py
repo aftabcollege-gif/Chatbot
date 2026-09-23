@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Optional
@@ -129,16 +130,83 @@ def _process(doc_id: str) -> None:
         _set_status(doc_id, "ERROR", 0, f"خطای پردازش: {exc}")
 
 
+#: statuses that mean "work finished" (nothing to requeue)
+TERMINAL_STATUSES = ("READY", "ERROR")
+
+#: how long a document may stay in a working status before it is retried
+STALE_SECONDS = 120
+MAX_ATTEMPTS = 3
+
+_started: Dict[str, float] = {}
+_attempts: Dict[str, int] = {}
+_watchdog_started = False
+
+
 def submit_document(doc_id: str) -> None:
     """Submit a document for background processing (threaded)."""
+    _started[doc_id] = time.time()
     _executor.submit(_safe_process, doc_id)
+    _ensure_watchdog()
 
 
 def _safe_process(doc_id: str) -> None:
+    _attempts[doc_id] = _attempts.get(doc_id, 0) + 1
     try:
         _process(doc_id)
     except Exception as exc:  # noqa: BLE001
         _set_status(doc_id, "ERROR", 0, f"خطای پردازش: {exc}")
+    finally:
+        _started.pop(doc_id, None)
+
+
+def requeue_unfinished(log=print) -> int:
+    """Restart documents that were left mid-processing.
+
+    A document can stay in ``UPLOADED``/``EMBEDDING``/... forever when the
+    process is closed mid-way (or when its worker thread died).  The user sees
+    "بارگذاری شد و در حال پردازش است" and the source never becomes usable.
+    Requeuing them here is what makes the resources page eventually finish.
+    """
+    requeued = 0
+    try:
+        rows = db.query_all(
+            "SELECT id, status, processing_progress FROM documents "
+            "WHERE status IS NULL OR status NOT IN ('READY','ERROR')"
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"[docproc] requeue skipped: {exc!r}")
+        return 0
+    now = time.time()
+    for row in rows:
+        doc_id = row["id"] if not isinstance(row, dict) else row["id"]
+        started = _started.get(doc_id, 0)
+        if started and now - started < STALE_SECONDS:
+            continue  # still being worked on
+        if _attempts.get(doc_id, 0) >= MAX_ATTEMPTS:
+            _set_status(doc_id, "ERROR", 0, "پردازش پس از چند تلاش کامل نشد؛ فایل را دوباره بارگذاری کنید.")
+            continue
+        log(f"[docproc] requeue {doc_id} (status={row['status']})")
+        submit_document(doc_id)
+        requeued += 1
+    return requeued
+
+
+def _ensure_watchdog() -> None:
+    """Start the background watchdog that finishes stuck documents."""
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(STALE_SECONDS / 2)
+            try:
+                requeue_unfinished(log=lambda message: print(message, flush=True))
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(target=_loop, name="docproc-watchdog", daemon=True).start()
 
 
 def shutdown(self) -> None:
