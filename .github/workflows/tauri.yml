@@ -199,9 +199,14 @@ jobs:
           $out = & $iscc "installer\EnterpriseAI.iss" 2>&1 | Out-String
           $out | Write-Host
           if ($LASTEXITCODE -ne 0) {
-            $interesting = ($out -split "`n") |
-              Where-Object { $_ -match "Error|error|Cannot|can't|does not exist|Unknown|failed" } |
-              Select-Object -Last 12
+            $lines = $out -split "`n"
+            $indexes = 0..($lines.Count - 1) | Where-Object { $lines[$_] -match "Error|error|Cannot|can't|does not exist|Unknown|failed" }
+            $interesting = @()
+            foreach ($i in $indexes) {
+              $interesting += $lines[$i]
+              if ($i + 1 -lt $lines.Count) { $interesting += $lines[$i + 1] }
+            }
+            $interesting = $interesting | Select-Object -Last 16
             $one = (($interesting -join " | ") -replace "`r", "")
             if ($one.Length -gt 950) { $one = $one.Substring($one.Length - 950) }
             if (-not $one) { $one = ($out -split "`n" | Select-Object -Last 5) -join " | " }

@@ -104,26 +104,10 @@ Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{userappdata}\EnterpriseAI"; Check: ShouldDeleteData
 
 [Code]
-// Windows API used for the (non-blocking) RAM warning below.  The [Code]
-// section is Delphi/Pascal, so comments use // (a leading ';' is a syntax
-// error there, even though the rest of the .iss file uses ';').
-function GetPhysicallyInstalledSystemMemory(var TotalMemoryInKilobytes: Cardinal): Boolean;
-  external 'GetPhysicallyInstalledSystemMemory@kernel32.dll stdcall';
-
+// The [Code] section is Delphi/Pascal: comments use // (a leading ';' is a
+// syntax error here, unlike the rest of the .iss file).  Only constructs that
+// ISCC 6 accepts unconditionally are used.
 function ShouldDeleteData: Boolean;
 begin
   Result := MsgBox('آیا داده‌های کاربر (پایگاه داده و اسناد) هم حذف شوند؟', mbConfirmation, MB_YESNO) = IDYES;
-end;
-
-function InitializeSetup(): Boolean;
-var
-  RamMB: Cardinal;
-begin
-  Result := True;
-  // Basic RAM warning (does not block).
-  RamMB := 0;
-  if GetPhysicallyInstalledSystemMemory(RamMB) then begin
-    if RamMB < 7*1024*1024 then
-      MsgBox('هشدار: حداقل ۸ گیگابایت رم پیشنهاد می‌شود.', MB_OK, MB_OK);
-  end;
 end;
