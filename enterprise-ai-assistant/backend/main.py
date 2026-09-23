@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 # Ensure the backend package root is importable when frozen / run directly.
@@ -36,12 +36,60 @@ from services.embedding_service import get_embedding_service  # noqa: E402
 from services.reranker_service import get_reranker_service  # noqa: E402
 
 
+def _first_run_bootstrap() -> None:
+    """Guarantee that a usable admin account exists before the UI opens.
+
+    Without this the packaged application showed a login page with no account
+    behind it and no link to the setup wizard — the classic "initial login"
+    dead end.
+    """
+    from core import bootstrap
+
+    try:
+        info = bootstrap.bootstrap_info()
+        if not info.get("has_admin"):
+            result = bootstrap.bootstrap_admin()
+            print(
+                "[bootstrap] حساب مدیر ساخته شد  |  "
+                f"username={result['username']}  password={result['password']}"
+            )
+            print(f"[bootstrap] credentials file: {bootstrap.credentials_path()}")
+        else:
+            print("[bootstrap] admin account already present")
+    except Exception as exc:  # pragma: no cover - never block startup
+        print(f"[bootstrap] skipped: {exc!r}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB schema and warm up AI services.
-    init_db()
-    get_embedding_service()
-    get_reranker_service()
+    try:
+        init_db()
+    except Exception as exc:  # pragma: no cover
+        print(f"[startup] database init failed: {exc!r}")
+    _first_run_bootstrap()
+    # Documents left mid-processing by a previous session would otherwise stay
+    # "in progress" forever on the resources page.
+    try:
+        from workers.document_processor import requeue_unfinished
+
+        count = requeue_unfinished(log=lambda message: print(message, flush=True))
+        if count:
+            print(f"[startup] requeued {count} unfinished document(s)")
+    except Exception as exc:  # pragma: no cover - never block startup
+        print(f"[startup] document requeue skipped: {exc!r}")
+    # Warm up AI services (never fatal).
+    try:
+        get_embedding_service()
+    except Exception as exc:  # pragma: no cover
+        print(f"[startup] embedding service unavailable: {exc!r}")
+    try:
+        get_reranker_service()
+    except Exception as exc:  # pragma: no cover
+        print(f"[startup] reranker unavailable: {exc!r}")
+    print(
+        f"[startup] vector backend: {db.vec_backend()} "
+        f"(sqlite-vec path: {db.vec_loaded_path() or '-'})"
+    )
     yield
 
 
@@ -87,6 +135,39 @@ app.include_router(settings_router.router)
 app.include_router(analytics.router)
 
 
+def _setup_done() -> bool:
+    try:
+        row = db.query_one("SELECT completed FROM setup_status WHERE id=1")
+        return bool(row and row["completed"])
+    except Exception:
+        return True
+
+
+@app.get("/api/diagnostics", include_in_schema=False)
+async def diagnostics():
+    """Offline support endpoint: shows what the packaged app resolved."""
+    return {
+        "version": settings.app_version,
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "root": str(settings.root),
+        "appdata": str(settings.appdata),
+        "db_path": str(settings.db_path),
+        "db_exists": settings.db_path.exists(),
+        "frontend_dist": str(_frontend_dist),
+        "frontend_found": _frontend_dist.exists(),
+        "models": str(settings.model_abspath("models")),
+        "models_found": settings.model_abspath("models").exists(),
+        "extensions_dir": str(settings.extensions_dir),
+        "vector_backend": db.vec_backend(),
+        "vector_available": db.vec_available(),
+        "vector_load_error": db.vec_load_error(),
+        "vector_loaded_path": db.vec_loaded_path(),
+        "embedding_backend": get_embedding_service().backend,
+        "setup_completed": _setup_done(),
+        "has_admin": db.query_one("SELECT 1 FROM users WHERE is_superadmin=1 LIMIT 1") is not None,
+    }
+
+
 @app.exception_handler(Exception)
 async def unhandled_handler(request, exc):  # pragma: no cover
     import traceback
@@ -100,11 +181,12 @@ async def unhandled_handler(request, exc):  # pragma: no cover
 # --------------------------------------------------------------------------- #
 _frontend_dist = settings.frontend_dist
 if _frontend_dist.exists():
-    app.mount(
-        "/assets",
-        StaticFiles(directory=str(_frontend_dist / "assets")),
-        name="assets",
-    )
+    # Mount the Vite assets directory only when it exists: a missing/partial
+    # frontend build must not prevent the API (and the login screen) from
+    # starting.
+    _assets_dir = _frontend_dist / "assets"
+    if _assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
@@ -114,6 +196,10 @@ if _frontend_dist.exists():
         candidate = _frontend_dist / full_path
         if full_path and candidate.is_file():
             return FileResponse(str(candidate))
+        # First run: send the user straight to the setup wizard instead of a
+        # login page they cannot possibly pass.
+        if full_path in ("", "index.html", "login") and not _setup_done():
+            return RedirectResponse(url="/setup", status_code=307)
         return FileResponse(str(_frontend_dist / "index.html"))
 else:
     @app.get("/", include_in_schema=False)

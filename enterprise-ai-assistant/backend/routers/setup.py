@@ -1,8 +1,11 @@
 """First-run setup wizard endpoints."""
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, HTTPException
 
+from core import bootstrap
 from core import database as db
 from core.security import hash_password
 from models.schemas import AdminSetup, OrganizationSetup
@@ -14,6 +17,35 @@ router = APIRouter(prefix="/api/setup", tags=["setup"])
 def _setup_completed() -> bool:
     row = db.query_one("SELECT completed FROM setup_status WHERE id=1")
     return bool(row and row["completed"])
+
+
+@router.get("/bootstrap-info")
+def bootstrap_info():
+    """Credentials generated on first run, so the login page can show them.
+
+    Only served on the loopback interface and only while the password has not
+    been used yet (the file is deleted after the first successful login).
+    """
+    return bootstrap.bootstrap_info()
+
+
+@router.post("/reset-admin")
+def reset_admin():
+    """Create or reset the super-admin account (offline recovery path).
+
+    Disabled by default: it is a local-only recovery helper for support staff
+    and for the standalone repair launcher, which sets
+    ``EAI_ALLOW_ADMIN_RESET=1`` before starting the backend.
+    """
+    if os.environ.get("EAI_ALLOW_ADMIN_RESET") != "1":
+        raise HTTPException(status_code=403, detail="این قابلیت غیرفعال است.")
+    result = bootstrap.reset_credentials()
+    return {
+        "success": True,
+        "username": result["username"],
+        "password": result["password"],
+        "created": result["created"],
+    }
 
 
 @router.get("/status")
@@ -40,7 +72,15 @@ def status():
 @router.post("/admin")
 def create_admin(payload: AdminSetup):
     if db.query_one("SELECT 1 FROM users WHERE is_superadmin=1 LIMIT 1"):
-        raise HTTPException(status_code=400, detail="مدیر سیستم قبلاً ایجاد شده است.")
+        # A bootstrap admin already exists (created automatically on first run
+        # so the user is never locked out).  Treat the wizard as a password /
+        # profile update instead of failing the whole setup.
+        result = bootstrap.bootstrap_admin(
+            username=payload.username.strip(), reset_password=True
+        )
+        db.execute("UPDATE setup_status SET current_step=2 WHERE id=1")
+        audit_service.log("setup.admin_updated", actor_id=result["admin_id"], actor_name=payload.name)
+        return {"success": True, "user_id": result["admin_id"], "updated": True}
     uid = db.insert_and_pk(
         "users",
         {
@@ -108,7 +148,8 @@ def create_organization(payload: OrganizationSetup):
 @router.post("/complete")
 def complete():
     if not db.query_one("SELECT 1 FROM users WHERE is_superadmin=1 LIMIT 1"):
-        raise HTTPException(status_code=400, detail="مدیر سیستم ایجاد نشده است.")
+        # Self-heal: never leave the user with an unusable installation.
+        bootstrap.bootstrap_admin()
     if not db.query_one("SELECT 1 FROM organizations LIMIT 1"):
         raise HTTPException(status_code=400, detail="سازمان ایجاد نشده است.")
     db.execute(

@@ -123,7 +123,7 @@ jobs:
             "models\reranker\model.onnx",
             "models\reranker\tokenizer.json",
             "llm\llama-server.exe",
-            "extensions\sqlite_vec.dll",
+            "extensions\vec0.dll",
             "prerequisites\vc_redist.x64.exe"
           )
           if ($env:EAI_LARGE_MODEL -eq "1") {

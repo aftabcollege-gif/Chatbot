@@ -92,22 +92,25 @@ fn start_llm(app: &tauri::AppHandle) -> Option<Child> {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get().to_string())
         .unwrap_or_else(|_| "4".to_string());
+    // A Vec<String> keeps every argument the same type: an array literal that
+    // mixes &str with &String does not compile.
+    let args: Vec<String> = vec![
+        "--model".into(),
+        model.to_string_lossy().to_string(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        LLM_PORT.to_string(),
+        "--ctx-size".into(),
+        "4096".into(),
+        "--threads".into(),
+        threads.clone(),
+        "--parallel".into(),
+        "2".into(),
+    ];
     Command::new(exe)
         .current_dir(&dir)
-        .args([
-            "--model",
-            model.to_str().unwrap_or(""),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &LLM_PORT.to_string(),
-            "--ctx-size",
-            "4096",
-            "--threads",
-            &threads,
-            "--parallel",
-            "2",
-        ])
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

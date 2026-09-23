@@ -1,9 +1,38 @@
-name: Build Tauri (Inno Setup)
+name: Build Tauri + Inno Setup (EnterpriseAI setup.exe)
+
+# Builds the installer that brands itself "EnterpriseAI" and installs to
+# `C:\Program Files\EnterpriseAI\EnterpriseAI.exe` — the product the users have
+# actually installed (see installer/EnterpriseAI.iss).
+#
+# Two things this workflow must get right, both of which used to make it fail:
+#   * `desktop/src-tauri/icons/*` and `installer/assets/icon.ico` must exist
+#     (Tauri refuses to build a bundle without them);
+#   * Tauri's `externalBin` side cars must be staged as
+#     `src-tauri/bin/<name>-x86_64-pc-windows-msvc.exe` before `tauri build`.
+#
+# Failure reporting: the Actions log stream is not reachable from every
+# network, so each step writes its tail into the Step Summary and an
+# `::error::` annotation, and the workflow commits a diagnostics file.
+
+permissions:
+  contents: write
 
 on:
   workflow_dispatch:
   push:
+    branches: [main, master, "arena/**"]
     tags: ["v*"]
+    paths:
+      - "enterprise-ai-assistant/desktop/**"
+      - "enterprise-ai-assistant/installer/**"
+      - "enterprise-ai-assistant/backend/**"
+      - "enterprise-ai-assistant/frontend/**"
+      - "enterprise-ai-assistant/scripts/**"
+      - ".github/workflows/tauri.yml"
+
+concurrency:
+  group: tauri-inno-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -17,43 +46,234 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with: { python-version: "3.11", architecture: "x64" }
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with: { node-version: "20" }
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Add Rust target
-        run: rustup target add x86_64-pc-windows-msvc
 
       - name: Install Python deps + build backend
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt pyinstaller
-          cd backend; pyinstaller --noconfirm --clean backend-server.spec; cd ..
+          Push-Location backend
+          pyinstaller --noconfirm --clean backend-server.spec
+          Pop-Location
+          if (!(Test-Path "backend\dist\backend-server\backend-server.exe")) {
+            throw "backend-server.exe was not produced"
+          }
 
-      - name: Download models & prerequisites
+      - name: Download models & prerequisites (offline)
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
-          powershell -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\download-models.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Model download failed" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\download-prerequisites.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Prerequisite download failed" }
 
       - name: Build frontend
         run: |
           cd frontend
           npm ci
           npm run build
-          cd ..
 
-      - name: Build Tauri app + NSIS/MSI
+      - name: Stage Tauri side cars and verify bundle inputs
+        shell: pwsh
+        run: |
+          $problems = @()
+          # --- side cars expected by tauri.conf.json: externalBin ---
+          New-Item -ItemType Directory -Force -Path desktop\src-tauri\bin | Out-Null
+          $triple = "x86_64-pc-windows-msvc"
+          Copy-Item backend\dist\backend-server\backend-server.exe "desktop\src-tauri\bin\backend-server-$triple.exe" -Force
+          if (Test-Path llm\llama-server.exe) {
+            Copy-Item llm\llama-server.exe "desktop\src-tauri\bin\llama-server-$triple.exe" -Force
+          } else {
+            $problems += "llm\llama-server.exe is missing (the app degrades to extractive answers)"
+          }
+          # --- icons required by the bundler and by ISCC ---
+          foreach ($icon in @("desktop\src-tauri\icons\32x32.png","desktop\src-tauri\icons\128x128.png",
+                              "desktop\src-tauri\icons\128x128@2x.png","desktop\src-tauri\icons\icon.ico",
+                              "installer\assets\icon.ico")) {
+            if (!(Test-Path $icon)) { $problems += "missing icon: $icon" }
+          }
+          foreach ($need in @("frontend\dist\index.html","config\default.yaml","backend\dist\backend-server\backend-server.exe")) {
+            if (!(Test-Path $need)) { $problems += "missing: $need" }
+          }
+          Write-Host "side cars:"; Get-ChildItem desktop\src-tauri\bin | Select-Object Name,Length | Format-Table -AutoSize
+          if ($problems.Count -gt 0) {
+            $msg = $problems -join " | "
+            Write-Host "::error::bundle input problems: $msg"
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content $env:GITHUB_STEP_SUMMARY "bundle input problems: $msg" }
+          }
+          # Only the hard requirements abort the build.
+          if (!(Test-Path "backend\dist\backend-server\backend-server.exe") -or
+              !(Test-Path "desktop\src-tauri\bin\backend-server-$triple.exe") -or
+              !(Test-Path "installer\assets\icon.ico")) { throw "hard bundle inputs missing: $($problems -join ' | ')" }
+
+      - name: Build the desktop shell (tauri build)
+        id: tauri
+        shell: pwsh
         run: |
           cd desktop
           npm install
-          npx tauri build
+          # tauri.conf.json's beforeBuildCommand now builds the frontend itself
+          # ('npm --prefix ../frontend run build') instead of recursing into
+          # desktop's own 'tauri build' script.
+          # --no-bundle: build the executable only.  The customer-facing
+          # installer is the Inno one below; the Tauri bundlers (NSIS/WiX) are
+          # a nice extra and are attempted separately so they can never block
+          # the deliverable.
+          $out = npx tauri build --no-bundle 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          $out | Write-Host
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content $env:GITHUB_STEP_SUMMARY "### tauri build (exit $code)"
+            Add-Content $env:GITHUB_STEP_SUMMARY "``````text"
+            Add-Content $env:GITHUB_STEP_SUMMARY (($out -split "`n" | Select-Object -Last 60) -join "`n")
+            Add-Content $env:GITHUB_STEP_SUMMARY "``````"
+          }
+          if ($code -ne 0) {
+            # The Actions log stream is not reachable from every network, so
+            # surface the interesting lines as a workflow annotation (readable
+            # through the REST API) and keep the full tail in the summary.
+            $interesting = ($out -split "`n") |
+              Where-Object { $_ -match "error|Error|failed|cannot|not found|No such|denied|panicked" } |
+              Where-Object { $_ -notmatch "^\s*$" } |
+              Select-Object -Last 15
+            $one = (($interesting -join " | ") -replace "`r", "")
+            if ($one.Length -gt 950) { $one = $one.Substring($one.Length - 950) }
+            if (-not $one) { $one = ($out -split "`n" | Select-Object -Last 5) -join " | " }
+            Write-Host "::error::tauri build (exit $code): $one"
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content $env:GITHUB_STEP_SUMMARY "error: $one" }
+            throw "tauri build failed ($code)"
+          }
+
+      - name: Try the MSI bundle (best effort)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cd desktop
+          npx tauri build --bundles msi 2>&1 | Select-Object -Last 25 | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::MSI bundling failed; setup.exe (Inno) is unaffected"
+          }
+
+      - name: Normalise the desktop binary name (EnterpriseAI.exe)
+        shell: pwsh
+        run: |
+          $release = "desktop\src-tauri\target\release"
+          $exe = Get-ChildItem $release -Filter "*.exe" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -notmatch "build-script|backend-server|llama-server" } |
+                   Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $exe) { throw "no desktop executable found in $release" }
+          if ($exe.Name -ne "EnterpriseAI.exe") {
+            Copy-Item $exe.FullName "$release\EnterpriseAI.exe" -Force
+          }
+          Get-ChildItem $release -Filter "*.exe" | Select-Object Name,Length | Format-Table -AutoSize
+          Write-Host ("target release contains EnterpriseAI.exe: " + (Test-Path (Join-Path $release "EnterpriseAI.exe")))
+
+      - name: Keep the build log on the branch (diagnostics)
+        if: failure()
+        shell: pwsh
+        run: |
+          if (!(Test-Path ..\.ci)) { return }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ..\.ci
+          git commit -q -m "ci: tauri build diagnostics [skip ci]" 2>$null
+          git push origin "HEAD:${{ github.ref_name }}" 2>$null
+
+      - name: Build EnterpriseAI setup.exe (Inno Setup)
+        id: iscc
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup (ISCC.exe) not found on the runner" }
+          $out = & $iscc "installer\EnterpriseAI.iss" 2>&1 | Out-String
+          $out | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            $lines = $out -split "`n"
+            $indexes = 0..($lines.Count - 1) | Where-Object { $lines[$_] -match "Error|error|Cannot|can't|does not exist|Unknown|failed" }
+            $interesting = @()
+            foreach ($i in $indexes) {
+              $interesting += $lines[$i]
+              if ($i + 1 -lt $lines.Count) { $interesting += $lines[$i + 1] }
+            }
+            $interesting = $interesting | Select-Object -Last 16
+            $one = (($interesting -join " | ") -replace "`r", "")
+            if ($one.Length -gt 950) { $one = $one.Substring($one.Length - 950) }
+            if (-not $one) { $one = ($out -split "`n" | Select-Object -Last 5) -join " | " }
+            Write-Host "::error::ISCC failed ($LASTEXITCODE): $one"
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content $env:GITHUB_STEP_SUMMARY "ISCC: $one" }
+            throw "ISCC failed ($LASTEXITCODE)"
+          }
+          $setup = Get-ChildItem dist-installer -Filter "setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $setup) { throw "setup.exe was not produced by Inno Setup" }
+          Write-Host ("setup.exe: {0:N1} MB" -f ($setup.Length / 1MB))
+
+      - name: Collect deliverables + checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
+          $files = @()
+          if (!(Test-Path "dist-installer\setup.exe")) { throw "setup.exe missing in dist-installer" }
+          Copy-Item "dist-installer\setup.exe" "dist-release\setup.exe" -Force
+          $files += "dist-release\setup.exe"
+
+          # The Tauri MSI is a bonus; it must never break the release.
+          $msiDir = "desktop\src-tauri\target\release\bundle\msi"
+          if (Test-Path $msiDir) {
+            $msi = Get-ChildItem -LiteralPath $msiDir -Filter "*.msi" -File -ErrorAction SilentlyContinue |
+                     Select-Object -First 1
+            if ($msi) {
+              Copy-Item -LiteralPath $msi.FullName -Destination "dist-release\EnterpriseAI.msi" -Force
+              $files += "dist-release\EnterpriseAI.msi"
+            }
+          }
+
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLower()
+            "$hash  $([IO.Path]::GetFileName($f))"
+          }
+          $lines | Out-File "dist-release\SHA256SUMS.txt" -Encoding ascii
+          Get-ChildItem dist-release | Select-Object Name, Length | Format-Table -AutoSize
+          $lines
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: tauri-windows-bundle
+          name: enterpriseai-setup
           path: |
-            enterprise-ai-assistant/desktop/src-tauri/target/release/bundle/**/*.exe
-            enterprise-ai-assistant/desktop/src-tauri/target/release/bundle/**/*.msi
+            enterprise-ai-assistant/dist-release/*
+            enterprise-ai-assistant/dist-installer/*.exe
           retention-days: 30
+
+      - name: Publish to the release (stable download link)
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # softprops/action-gh-release silently SKIPS a file when an asset with
+          # the same name already exists, which is why the release kept serving
+          # the old (broken) setup.exe.  The CLI with --clobber really replaces it.
+          $release = "setup-latest"
+          $assets = @()
+          if (Test-Path "dist-release\setup.exe") { $assets += "dist-release\setup.exe" }
+          if (Test-Path "dist-release\EnterpriseAI.msi") { $assets += "dist-release\EnterpriseAI.msi" }
+          if (Test-Path "dist-release\SHA256SUMS.txt") { $assets += "dist-release\SHA256SUMS.txt" }
+          if ($assets.Count -eq 0) { throw "nothing to publish" }
+          gh release view $release *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $release --title "setup.exe installer" --notes "EnterpriseAI Windows installer (offline)"
+          }
+          gh release upload $release $assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw "release upload failed ($LASTEXITCODE)" }
+          gh release view $release --json assets -q '.assets[] | "\(.name)  \(.size) bytes"'

@@ -152,7 +152,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "tar failed to extract sqlite-vec (exit $LASTEXITCODE)" }
     $vecDll = Get-ChildItem -Path "$Root\extensions" -Recurse -Filter vec0.dll | Select-Object -First 1
     if (-not $vecDll) { throw "vec0.dll not found" }
-    Copy-Item $vecDll.FullName "$Root\extensions\sqlite_vec.dll" -Force
+    # NOTE: the file name matters — SQLite derives the entry point from it,
+    # and only ``vec0`` exposes sqlite3_vec_init. Never rename it.
     Remove-Item "$Root\extensions\vec.tar.gz" -Force -ErrorAction SilentlyContinue
 
     $required = @(
@@ -162,7 +163,7 @@ try {
         "$Root\models\embedding\tokenizer.json",
         "$Root\models\reranker\model.onnx",
         "$Root\models\reranker\tokenizer.json",
-        "$Root\extensions\sqlite_vec.dll"
+        "$Root\extensions\vec0.dll"
     )
     if ($env:EAI_LARGE_MODEL -eq "1") {
         $required += "$Root\models\llm\qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"

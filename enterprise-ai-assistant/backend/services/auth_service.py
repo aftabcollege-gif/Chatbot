@@ -59,7 +59,15 @@ def authenticate(username: str, password: str) -> Dict[str, Any]:
         )
         raise AuthError("نام کاربری یا رمز عبور اشتباه است.", status_code=401)
 
-    # Successful login.
+    # Successful login: the generated bootstrap password is now in use, so the
+    # plain-text copy stops being handed out by /api/setup/bootstrap-info.
+    try:
+        from core import bootstrap
+
+        bootstrap.clear_credentials_file()
+    except Exception:
+        pass
+
     if needs_rehash(user["password_hash"]):
         db.execute(
             "UPDATE users SET password_hash=? WHERE id=?",
