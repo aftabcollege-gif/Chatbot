@@ -196,8 +196,19 @@ jobs:
           )
           $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "Inno Setup (ISCC.exe) not found on the runner" }
-          & $iscc "installer\EnterpriseAI.iss" 2>&1 | Write-Host
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          $out = & $iscc "installer\EnterpriseAI.iss" 2>&1 | Out-String
+          $out | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            $interesting = ($out -split "`n") |
+              Where-Object { $_ -match "Error|error|Cannot|can't|does not exist|Unknown|failed" } |
+              Select-Object -Last 12
+            $one = (($interesting -join " | ") -replace "`r", "")
+            if ($one.Length -gt 950) { $one = $one.Substring($one.Length - 950) }
+            if (-not $one) { $one = ($out -split "`n" | Select-Object -Last 5) -join " | " }
+            Write-Host "::error::ISCC failed ($LASTEXITCODE): $one"
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content $env:GITHUB_STEP_SUMMARY "ISCC: $one" }
+            throw "ISCC failed ($LASTEXITCODE)"
+          }
           $setup = Get-ChildItem dist-installer -Filter "setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $setup) { throw "setup.exe was not produced by Inno Setup" }
           Write-Host ("setup.exe: {0:N1} MB" -f ($setup.Length / 1MB))

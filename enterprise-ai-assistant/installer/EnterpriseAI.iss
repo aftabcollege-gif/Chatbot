@@ -31,8 +31,18 @@ SetupIconFile=assets\icon.ico
 ShowLanguageDialog=yes
 
 [Languages]
-Name: "persian"; MessagesFile: "compiler:Languages\Persian.isl"
+; Inno Setup does not ship Persian.isl with every release, so the Persian entry
+; is only added when a translation is actually available (a copy committed under
+; installer/languages/ or one that ships with the installed compiler).  Without
+; it, ISCC aborts with "Can't open language file ... Persian.isl".
 Name: "english"; MessagesFile: "compiler:Default.isl"
+#if FileExists(AddBackslash(SourcePath) + "languages\Persian.isl")
+Name: "persian"; MessagesFile: "languages\Persian.isl"
+#elif FileExists("C:\Program Files (x86)\Inno Setup 6\Languages\Persian.isl")
+Name: "persian"; MessagesFile: "compiler:Languages\Persian.isl"
+#elif FileExists("C:\Program Files\Inno Setup 6\Languages\Persian.isl")
+Name: "persian"; MessagesFile: "C:\Program Files\Inno Setup 6\Languages\Persian.isl"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "ایجاد آیکون روی دسکتاپ"; GroupDescription: "آیکون‌ها:"; Flags: unchecked
