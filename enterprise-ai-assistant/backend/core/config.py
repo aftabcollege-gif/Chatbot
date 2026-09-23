@@ -60,11 +60,13 @@ class Config:
         # Electron shell stages config/ as a sibling under <resources>. Search
         # the backend dir first, then its parent, so the packaged app still
         # loads storage.allowed_types and the rest of the YAML settings.
-        for candidate in (
+        candidates = [
             self.root / "config" / "default.yaml",
             self.root.parent / "config" / "default.yaml",
             Path(__file__).resolve().parent.parent.parent / "config" / "default.yaml",
-        ):
+        ]
+        candidates += [root / "config" / "default.yaml" for root in self._known_install_roots()]
+        for candidate in candidates:
             if candidate.exists():
                 with open(candidate, "r", encoding="utf-8") as fh:
                     self._data = yaml.safe_load(fh) or {}
@@ -131,14 +133,65 @@ class Config:
     def theme(self) -> str:
         return self.get("app.theme", "dark")
 
+    #: Product folder names we ship under (Program Files, LOCALAPPDATA, ...).
+    INSTALL_TITLES = ("EnterpriseAI", "Chatbot Enterprise", "enterprise-ai-assistant")
+
+    @classmethod
+    def _known_install_roots(cls) -> List[Path]:
+        """Directories of *installed* copies of this application (best effort).
+
+        The packaged backend sometimes runs from a place that is not the
+        install root (PyInstaller onedir under ``{app}\backend``, a Tauri
+        bundle, the standalone mini launcher).  Assets such as
+        ``models/``, ``llm/`` and ``frontend/dist`` live in the install root,
+        so it is added to the asset search path.  This is what makes the
+        "models not found" page find the models that the installer placed.
+        """
+        roots: List[Path] = []
+
+        def _add(path: Path) -> None:
+            try:
+                if path.is_dir() and path not in roots:
+                    roots.append(path)
+            except OSError:
+                pass
+
+        env_root = os.environ.get("EAI_ROOT")
+        if env_root:
+            _add(Path(env_root.strip().strip('"')))
+        for base in (
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+            os.environ.get("ProgramW6432"),
+            os.environ.get("LOCALAPPDATA"),
+            os.environ.get("APPDATA"),
+        ):
+            if not base:
+                continue
+            base_path = Path(base)
+            for title in cls.INSTALL_TITLES:
+                _add(base_path / title)
+                _add(base_path / "Programs" / title)
+        # Scripts / installers we know about, plus the executable's parents.
+        for candidate in (Path("C:/EnterpriseAI"), Path("C:/Chatbot Enterprise"), Path("/opt/EnterpriseAI")):
+            _add(candidate)
+        try:
+            exe_dir = Path(sys.executable).resolve().parent
+            for parent in (exe_dir, exe_dir.parent, exe_dir.parent.parent):
+                _add(parent)
+        except (OSError, ValueError):
+            pass
+        return roots
+
     def _asset_roots(self) -> List[Path]:
         """Directories that may contain bundled assets.
 
         Covers every layout we ship: frozen-onedir (``<app>/backend`` with
         ``<app>`` as the sibling root), Inno Setup (``{app}\backend`` +
         ``{app}\frontend\dist``), Electron (``resources\backend``), a plain
-        source checkout, and any extra directory handed to us through
-        ``EAI_ASSETS_DIR`` (used by the standalone mini launcher).
+        source checkout, any extra directory handed to us through
+        ``EAI_ASSETS_DIR`` / ``EAI_ROOT``, and the known install directories
+        (so an installation that lives next to the executable is used).
         """
         roots: List[Path] = [self.root, self.root.parent]
         extra = os.environ.get("EAI_ASSETS_DIR")
@@ -149,6 +202,7 @@ class Config:
                     roots.append(Path(part))
         if getattr(sys, "frozen", False):
             roots.append(Path(sys.executable).resolve().parent)
+        roots += self._known_install_roots()
         roots.append(Path.cwd())
         seen: List[Path] = []
         for r in roots:

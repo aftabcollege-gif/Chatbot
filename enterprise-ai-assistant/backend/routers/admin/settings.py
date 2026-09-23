@@ -32,45 +32,128 @@ def update_settings(payload: SettingsUpdate, admin: dict = Depends(require_admin
 
 @router.get("/models")
 def get_models(admin: dict = Depends(require_admin)):
+    """Model/engine status for the admin "models" page.
+
+    Besides the resolved path, report *where* the app looked and how many files
+    it found, because "بارگذاری نشده" with no explanation is what users hit when
+    the installation root is not where the backend expects it.
+    """
+    from pathlib import Path
+
     from core.config import settings as cfg
     from services.embedding_service import get_embedding_service
     from services.reranker_service import get_reranker_service
-    import os
 
-    def dir_info(path):
-        p = path if isinstance(path, os.PathLike) else path
+    def dir_info(path) -> dict:
+        path_obj = Path(path) if not hasattr(path, "exists") else path
         size = 0
+        files = 0
         exists = False
         try:
-            path_obj = path if hasattr(path, "exists") else __import__("pathlib").Path(path)
             exists = path_obj.exists()
             if exists and path_obj.is_dir():
                 for f in path_obj.rglob("*"):
                     if f.is_file():
                         size += f.stat().st_size
+                        files += 1
             elif exists:
                 size = path_obj.stat().st_size
+                files = 1
         except OSError:
             pass
-        return {"exists": exists, "size_mb": round(size / 1024 / 1024, 2)}
+        return {
+            "exists": exists,
+            "size_mb": round(size / 1024 / 1024, 2),
+            "files": files,
+        }
+
+    def candidates(rel: str) -> list:
+        return [str(root / rel) for root in cfg._asset_roots()]
+
+    def entry(rel: str, extra: dict | None = None, patterns: tuple = ()) -> dict:
+        resolved = cfg.model_abspath(rel)
+
+        # "Not found" used to mean "the folder path in config/default.yaml does
+        # not exist", even when the models were sitting right there under a
+        # different file/folder name.  Look for the real artefacts first.
+        if not resolved.exists() and patterns:
+            for root in cfg._asset_roots():
+                try:
+                    for pattern in patterns:
+                        hits = sorted(p for p in root.glob(pattern) if p.exists())
+                        if hits:
+                            resolved = hits[0]
+                            break
+                except (OSError, ValueError):
+                    continue
+                if resolved.exists() and resolved != cfg.model_abspath(rel):
+                    break
+
+        info = dir_info(resolved)
+        data = {
+            "model_path": str(resolved),
+            "searched": candidates(rel),
+            **info,
+        }
+        if extra:
+            data.update(extra)
+        return data
+
+    def _inventory(cfg) -> dict:
+        """What model files actually exist, wherever they are."""
+        found: dict = {}
+        for label, patterns in (
+            ("llm", ("models/**/*.gguf", "llm/*.gguf", "*.gguf")),
+            ("embedding", ("models/**/*.onnx", "models/**/*.bin", "**/*.onnx")),
+        ):
+            hits = []
+            for root in cfg._asset_roots():
+                try:
+                    for pattern in patterns:
+                        for path in sorted(root.glob(pattern)):
+                            if path.is_file() and path.stat().st_size > 1024:
+                                if str(path) not in hits:
+                                    hits.append(str(path))
+                except (OSError, ValueError):
+                    continue
+            found[label] = hits[:12]
+        return found
+
+    llm_rel = cfg.get("llm.model_path", "models/llm")
+    llm_server_ok = False
+    try:
+        import httpx
+
+        llm_server_ok = httpx.get(f"{cfg.llm_server_url}/models", timeout=2.0).status_code == 200
+    except Exception:
+        llm_server_ok = False
 
     return {
-        "llm": {
-            "model_name": cfg.llm_model_name,
-            "model_path": str(cfg.model_abspath(cfg.get("llm.model_path", "models/llm"))),
-            "server_url": cfg.llm_server_url,
-            "context_size": cfg.llm_context_size,
-            **dir_info(cfg.model_abspath(cfg.get("llm.model_path", "models/llm"))),
-        },
-        "embedding": {
-            "backend": get_embedding_service().backend,
-            "dimension": cfg.embedding_dim,
-            "model_path": str(cfg.embedding_path),
-            **dir_info(cfg.embedding_path),
-        },
-        "reranker": {
-            "backend": get_reranker_service().backend,
-            "model_path": str(cfg.reranker_path),
-            **dir_info(cfg.reranker_path),
-        },
+        "llm": entry(
+            llm_rel,
+            patterns=("models/llm/*.gguf", "llm/*.gguf", "models/*.gguf"),
+            extra={
+                "model_name": cfg.llm_model_name,
+                "server_url": cfg.llm_server_url,
+                "server_ok": llm_server_ok,
+                "context_size": cfg.llm_context_size,
+            },
+        ),
+        "embedding": entry(
+            cfg.get("embedding.model_path", "models/embedding"),
+            patterns=("models/embedding/*.onnx", "models/embedding/*.bin"),
+            extra={
+                "backend": get_embedding_service().backend,
+                "dimension": cfg.embedding_dim,
+            },
+        ),
+        "reranker": entry(
+            cfg.get("reranker.model_path", "models/reranker"),
+            patterns=("models/reranker/*.onnx", "models/reranker/*.bin"),
+            extra={
+                "backend": get_reranker_service().backend,
+            },
+        ),
+        "asset_roots": [str(root) for root in cfg._asset_roots()],
+        "found": _inventory(cfg),
     }

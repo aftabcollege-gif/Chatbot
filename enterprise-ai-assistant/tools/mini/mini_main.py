@@ -23,7 +23,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-APP_PORT = 8751
+APP_PORT = 8741
 LLM_PORT = 8742
 
 BANNER = r"""
@@ -319,10 +319,26 @@ def main(argv: list[str] | None = None) -> int:
             pass
     print(BANNER, flush=True)
 
-    from mini_repair import data_dir, find_installations, repair_database, repair_installation
+    from mini_repair import (
+        borrow_missing_assets,
+        data_dir,
+        diagnose_installed_backend,
+        find_installations,
+        fix_installed_shortcuts,
+        free_ports,
+        persist_asset_environment,
+        repair_database,
+        repair_installation,
+    )
 
     installs = [] if (args.serve_only and not args.repair_report) else find_installations()
     install = installs[0] if installs else None
+
+    if not args.serve_only or args.repair_report:
+        try:
+            free_ports([8741, 8742, APP_PORT], log=print)
+        except Exception as exc:
+            print(f"    [!] بستن نسخه‌های قبلی ممکن نشد: {exc!r}")
 
     print("۱) بررسی نسخهٔ نصب‌شده ...")
     if args.repair_report:
@@ -335,6 +351,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(f"    مسیر نصب: {install}")
+            # Borrowing models/llm from another installation writes into the
+            # installation directory, so it runs here (with admin rights).
+            try:
+                for level, message in borrow_missing_assets(install, log=print):
+                    marker = {"ok": "[✓]", "warn": "[!]", "error": "[×]"}.get(str(level), "[·]")
+                    print(f"    {marker} {message}")
+            except Exception as exc:
+                print(f"    [!] استفاده از دارایی‌های نصب دیگر ممکن نشد: {exc!r}")
             report = repair_installation(install, log=print)
             _print_actions(report)
             _write_repair_report(report, args.repair_report)
@@ -344,14 +368,36 @@ def main(argv: list[str] | None = None) -> int:
     if install is not None:
         print(f"    مسیر نصب: {install}")
         elevated_done = False
-        if not _is_writable(install) and sys.platform == "win32" and not is_admin():
+        need_admin = not _is_writable(install) and sys.platform == "win32" and not is_admin()
+        if need_admin:
             print("    [!] برای تعمیر این مسیر دسترسی مدیر لازم است؛ درخواست UAC ...")
             elevated_done = relaunch_elevated(["--repair-only", "--serve-only"])
         if elevated_done:
             print("    [✓] تعمیر نسخهٔ نصب‌شده با دسترسی مدیر انجام شد.")
         else:
+            try:
+                for level, message in borrow_missing_assets(install, log=print):
+                    marker = {"ok": "[✓]", "warn": "[!]", "error": "[×]"}.get(str(level), "[·]")
+                    print(f"    {marker} {message}")
+            except Exception as exc:
+                print(f"    [!] استفاده از دارایی‌های نصب دیگر ممکن نشد: {exc!r}")
             report = repair_installation(install, log=print)
             _print_actions(report)
+
+        try:
+            for level, message in fix_installed_shortcuts(install, log=print):
+                marker = {"ok": "[✓]", "warn": "[!]", "error": "[×]"}.get(str(level), "[·]")
+                print(f"    {marker} {message}")
+        except Exception as exc:
+            print(f"    [!] اصلاح میان‌برها ممکن نشد: {exc!r}")
+
+        persist_asset_environment(install, log=print)
+        if not args.serve_only:
+            print("    بررسی اجرای نسخهٔ نصب‌شده ...")
+            try:
+                diagnose_installed_backend(install, log=print)
+            except Exception as exc:
+                print(f"    [!] بررسی بک‌اند نصب‌شده ممکن نشد: {exc!r}")
     else:
         print("    نسخهٔ نصب‌شده‌ای پیدا نشد (این برنامه به‌تنهایی کار می‌کند).")
 
@@ -413,6 +459,13 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://127.0.0.1:{APP_PORT}"
     print(f"۳) اجرای برنامهٔ مستقل روی {url}")
     print("    این پنجره را باز نگه دارید؛ برای خروج این پنجره را ببندید.")
+    if install is not None:
+        print("")
+        print("   برای اجرای برنامهٔ نصب‌شده (میان‌بر قبلی):")
+        print("    • ابتدا این پنجره را ببندید تا پورت آزاد شود،")
+        print("    • سپس همان میان‌بر «دستیار هوشمند سازمانی» را اجرا کنید.")
+        print("      اگر هنوز صفحهٔ سفید بود، همین فایل را دوباره اجرا کنید و")
+        print("      «گزارش بررسی» بالا را برای پشتیبانی بفرستید.")
     print("")
 
     if not args.no_browser:

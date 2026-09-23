@@ -67,6 +67,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover
         print(f"[startup] database init failed: {exc!r}")
     _first_run_bootstrap()
+    # Documents left mid-processing by a previous session would otherwise stay
+    # "in progress" forever on the resources page.
+    try:
+        from workers.document_processor import requeue_unfinished
+
+        count = requeue_unfinished(log=lambda message: print(message, flush=True))
+        if count:
+            print(f"[startup] requeued {count} unfinished document(s)")
+    except Exception as exc:  # pragma: no cover - never block startup
+        print(f"[startup] document requeue skipped: {exc!r}")
     # Warm up AI services (never fatal).
     try:
         get_embedding_service()

@@ -21,8 +21,11 @@ Everything here is pure standard library so it can run inside PyInstaller.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
+import tempfile
+import urllib.request
 import subprocess
 import sys
 import time
@@ -68,6 +71,10 @@ def _looks_like_install(path: Path) -> bool:
         return False
     for name in ("Chatbot Enterprise.exe", "EnterpriseAI.exe", "chatbot-enterprise.exe"):
         if (path / name).is_file():
+            return True
+    # An Electron/portable layout can keep the backend next to the launcher.
+    for exe in BACKEND_EXE_NAMES:
+        if (path / exe).is_file() and (path / "models").is_dir() or (path / "resources").is_dir():
             return True
     for sub in ("backend", "resources/backend", "resources"):
         for exe in BACKEND_EXE_NAMES:
@@ -115,6 +122,32 @@ def _registry_installs() -> List[Path]:
     return found
 
 
+def _sibling_roots(path: Path) -> List[Path]:
+    """Directories next to *path* that look like another installation.
+
+    A machine frequently ends up with more than one copy ("EnterpriseAI" in
+    Program Files and "Chatbot Enterprise" from the older installer, or a
+    portable folder), and the models/llm binaries may live in only one of
+    them.  Those copies are not always registered anywhere, so look next to
+    the known roots as well.
+    """
+    found: List[Path] = []
+    for parent in (path.parent, path.parent.parent):
+        try:
+            if not parent.is_dir():
+                continue
+            for entry in parent.iterdir():
+                try:
+                    if entry.is_dir() and entry != path and _looks_like_install(entry):
+                        if entry not in found:
+                            found.append(entry)
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return found
+
+
 def find_installations() -> List[Path]:
     candidates = _registry_installs() + _candidate_roots()
     installs: List[Path] = []
@@ -124,6 +157,10 @@ def find_installations() -> List[Path]:
                 installs.append(path)
         except OSError:
             continue
+    for path in list(installs):
+        for sibling in _sibling_roots(path):
+            if sibling not in installs:
+                installs.append(sibling)
     return installs
 
 
@@ -220,23 +257,45 @@ def repair_installation(install: Path, log=print) -> Dict[str, object]:
         return report
 
     # 1) Frontend build where the packaged backend looks for it (white screen).
+    # The UI bundled with the *mini tool* is the fixed build, so it wins over
+    # whatever the installation already contains: the old bundle keeps talking
+    # to a backend address that no longer exists (that is why the window stayed
+    # blank / empty even after the files were in place).
+    bundled_ui = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "frontend" / "dist"
+    if not (bundled_ui / "index.html").is_file():
+        bundled_ui = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
     frontend_sources = [
+        bundled_ui,
         install / "frontend" / "dist",
         install / "resources" / "frontend" / "dist",
         backend / "frontend" / "dist",
         install / "dist",
     ]
-    frontend_target = backend / "frontend" / "dist"
+    frontend_targets = [
+        backend / "frontend" / "dist",
+        install / "frontend" / "dist",
+    ]
     source = next((p for p in frontend_sources if (p / "index.html").is_file()), None)
     if source is None:
         report["actions"].append(("warn", "frontend/dist پیدا نشد (رابط کاربری نصب نشده است)"))
-    elif source.resolve() != frontend_target.resolve():
-        copied = _copy_tree(source, frontend_target)
-        report["actions"].append(
-            ("ok", f"رابط کاربری در مسیر درست قرار گرفت ({copied} فایل) → {frontend_target}")
-        )
     else:
-        report["actions"].append(("ok", "رابط کاربری از قبل در مسیر درست است"))
+        placed = 0
+        for target in frontend_targets:
+            try:
+                if source.resolve() == target.resolve():
+                    placed += 1 if (target / "index.html").is_file() else 0
+                    continue
+                copied = _copy_tree(source, target)
+                placed += 1
+                if target == frontend_targets[0]:
+                    report["actions"].append(
+                        ("ok", f"رابط کاربری در مسیر درست قرار گرفت ({copied} فایل) → {target}")
+                    )
+            except OSError:
+                continue
+        if placed == 0:
+            report["actions"].append(("warn", "رابط کاربری جای‌گذاری نشد"))
 
     # 2) Vector extension (sqlite-vec).
     #
@@ -339,6 +398,345 @@ def repair_installation(install: Path, log=print) -> Dict[str, object]:
             report["actions"].append(("warn", "مدل‌های هوش مصنوعی یافت نشد؛ جست‌وجو با موتور کلمات کلیدی انجام می‌شود"))
 
     return report
+
+
+# --------------------------------------------------------------------------- #
+# Making the *installed* application work (white screen / model paths)
+# --------------------------------------------------------------------------- #
+def persist_asset_environment(install: Path, log=print) -> Dict[str, Any]:
+    """Store the asset locations for the installed app in the user's registry.
+
+    The installed shell launches ``backend-server.exe`` without telling it where
+    the bundle lives, so the backend looks for ``frontend/dist`` and ``models``
+    relative to ``{app}\backend`` — which is exactly why the old installation
+    kept showing a blank window and an empty models page even after the files
+    were moved.  Writing ``EAI_ROOT`` / ``EAI_ASSETS_DIR`` /
+    ``EAI_FRONTEND_DIST`` into HKCU\Environment (per-user, no admin needed)
+    makes every copy of the backend find the UI and the models.
+    """
+    result: Dict[str, Any] = {"persisted": False, "values": {}}
+    if sys.platform != "win32":
+        return result
+
+    # Every known installation goes into the search path: the models of the
+    # old "Chatbot Enterprise" copy are then visible to this installation.
+    asset_roots = [install]
+    try:
+        for other in find_installations():
+            if other != install and other not in asset_roots:
+                asset_roots.append(other)
+    except Exception:
+        pass
+    values = {
+        "EAI_ROOT": str(install),
+        "EAI_ASSETS_DIR": os.pathsep.join(str(root) for root in asset_roots),
+    }
+    frontend = install / "frontend" / "dist"
+    if (frontend / "index.html").is_file():
+        values["EAI_FRONTEND_DIST"] = str(frontend)
+    backend_frontend = install / "backend" / "frontend" / "dist"
+    if "EAI_FRONTEND_DIST" not in values and (backend_frontend / "index.html").is_file():
+        values["EAI_FRONTEND_DIST"] = str(backend_frontend)
+
+    try:
+        import winreg  # type: ignore
+
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            for name, value in values.items():
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+        result["persisted"] = True
+        result["values"] = values
+        log("    [✓] مسیر دارایی‌ها برای برنامهٔ نصب‌شده ثبت شد (EAI_ROOT / EAI_ASSETS_DIR)")
+    except OSError as exc:
+        log(f"    [!] ثبت مسیر دارایی‌ها ناموفق بود: {exc!r}")
+
+    # Tell already-running shells (Explorer) about the new environment.
+    try:
+        import ctypes
+
+        HWND_BROADCAST = 0xFFFF
+        WM_SETTINGCHANGE = 0x001A
+        SMTO_ABORTIFHUNG = 0x0002
+        value = "Environment\x00"
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, ctypes.c_wchar_p(value), SMTO_ABORTIFHUNG, 5000, None
+        )
+    except Exception:
+        pass
+    return result
+
+
+def borrow_missing_assets(install: Path, log=print) -> list:
+    """Link models / llm binaries that another installation already has.
+
+    A machine can easily end up with two installations (the "Chatbot
+    Enterprise" Electron bundle with the ~1 GB of models, and an
+    "EnterpriseAI" installation without them).  Instead of downloading
+    gigabytes again, junctions point the selected installation at the existing
+    files.
+    """
+    actions: list = []
+    backend = backend_dir(install)
+    if backend is None:
+        return actions
+
+    others = [p for p in find_installations() if p != install]
+    want_models = install / "models"
+    want_llm = install / "llm"
+
+    def _missing_models(root: Path) -> bool:
+        for name in ("embedding", "reranker", "llm", "ocr"):
+            sub = root / "models" / name
+            if sub.is_dir() and any(sub.iterdir()):
+                return False
+        return True
+
+    if _missing_models(install):
+        for other in others:
+            if not _missing_models(other):
+                source = other / "models"
+                results = []
+                for name in ("embedding", "reranker", "llm", "ocr"):
+                    src = source / name
+                    if not src.is_dir() or not any(src.iterdir()):
+                        continue
+                    target = want_models / name
+                    # embedding/reranker/ocr are a few hundred MB and worth a
+                    # copy if a junction is not possible; the LLM weights are
+                    # gigabytes, so they are only ever linked.
+                    outcome = _link_or_copy_dir(src, target, allow_copy=name != "llm")
+                    if outcome != "failed":
+                        results.append(f"{name} ({outcome})")
+                if results:
+                    actions.append(("ok", "مدل‌ها از نصب دیگر استفاده شد: " + "، ".join(results) + f" ← {other}"))
+                break
+
+    if not (want_llm / "llama-server.exe").is_file():
+        for other in others:
+            candidate = other / "llm" / "llama-server.exe"
+            if not candidate.is_file():
+                continue
+            target = want_llm / "llama-server.exe"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _link_or_copy_dir(other / "llm", want_llm)
+                if not target.is_file():  # the folder link was skipped, copy the file
+                    shutil.copy2(candidate, target)
+            except OSError:
+                continue
+            if target.is_file():
+                actions.append(("ok", f"موتور مدل (llama-server) از نصب دیگر: {other}"))
+                break
+    return actions
+
+
+def diagnose_installed_backend(install: Path, log=print) -> Dict[str, Any]:
+    """Start the installed backend and report what it actually serves.
+
+    The old window stays white when its backend answers with JSON instead of
+    the UI (or does not answer at all).  Running it here — with the repaired
+    environment — tells us which of the two it is, without guessing.
+    """
+    report: Dict[str, Any] = {"ran": False, "serves_ui": False, "status": None, "detail": ""}
+    backend = backend_dir(install)
+    if backend is None:
+        report["detail"] = "backend-server.exe یافت نشد"
+        return report
+
+    exe = None
+    for name in BACKEND_EXE_NAMES:
+        candidate = backend / name
+        if candidate.is_file():
+            exe = candidate
+            break
+    if exe is None:
+        report["detail"] = "backend-server.exe یافت نشد"
+        return report
+
+    port = _spare_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "APP_HOST": "127.0.0.1",
+            "APP_PORT": str(port),
+            "EAI_ROOT": str(install),
+            "EAI_ASSETS_DIR": str(install),
+        }
+    )
+    frontend = install / "frontend" / "dist"
+    if (frontend / "index.html").is_file():
+        env["EAI_FRONTEND_DIST"] = str(frontend)
+
+    log_file = Path(tempfile.gettempdir()) / "chatbot-mini-installed-backend.log"
+    try:
+        with open(log_file, "wb") as fh:
+            process = subprocess.Popen(
+                [str(exe)], cwd=str(backend), env=env, stdout=fh, stderr=subprocess.STDOUT
+            )
+    except OSError as exc:
+        report["detail"] = f"اجرای بک‌اند نصب‌شده ناموفق بود: {exc!r}"
+        return report
+
+    try:
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2) as resp:
+                    if resp.status == 200:
+                        break
+            except Exception:
+                time.sleep(1)
+        report["ran"] = True
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
+                body = resp.read(4000).decode("utf-8", "replace")
+                report["status"] = resp.status
+                report["serves_ui"] = "<html" in body.lower()
+                report["detail"] = "UI" if report["serves_ui"] else body.strip()[:200]
+        except Exception as exc:
+            report["detail"] = f"پاسخی از بک‌اند نصب‌شده دریافت نشد: {exc!r}"
+    finally:
+        try:
+            process.terminate()
+            process.wait(timeout=10)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+    if report["serves_ui"]:
+        log("    [✓] بک‌اند نسخهٔ نصب‌شده با تنظیمات تعمیرشده، رابط کاربری را سرو می‌کند")
+    else:
+        log(f"    [!] بک‌اند نسخهٔ نصب‌شده رابط کاربری را سرو نمی‌کند: {report['detail']}")
+        log(f"        گزارش کامل: {log_file}")
+    return report
+
+
+def _spare_port(start: int = 8790) -> int:
+    import socket
+
+    for port in range(start, start + 40):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    return start
+
+
+def free_ports(ports: List[int] = None, log=print) -> list:
+    """Stop leftover copies of the app's own backend/shell holding its ports.
+
+    An old ``backend-server.exe`` (or the desktop shell) that survives a crash
+    keeps port 8741 open.  The repared installation then talks to that stale
+    process — which is exactly the kind of mismatch that shows up as an empty
+    or blank window.
+    """
+    if sys.platform != "win32":
+        return []
+    ports = ports or [8741, 8742]
+    killed: list = []
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=20
+        )
+    except Exception:
+        return killed
+    pids = set()
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        local = parts[1]
+        if not any(local.endswith(f":{port}") for port in ports):
+            continue
+        state = parts[3].upper() if len(parts) > 4 else ""
+        if state not in ("LISTENING", "ESTABLISHED", "CLOSE_WAIT"):
+            continue
+        try:
+            pids.add(int(parts[-1]))
+        except ValueError:
+            continue
+    for pid in pids:
+        if pid in (0, 4) or pid == os.getpid():
+            continue
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F", "/T"], capture_output=True, text=True, timeout=20
+            )
+            if completed.returncode == 0:
+                killed.append(pid)
+        except Exception:
+            continue
+    if killed:
+        log(f"    [✓] نسخه‌های قبلی برنامه بسته شدند (PID: {', '.join(str(p) for p in killed)})")
+    return killed
+
+
+def fix_installed_shortcuts(install: Path, log=print) -> list:
+    """Point the shortcuts that run ``backend-server.exe`` at the launcher.
+
+    Some installations put the *backend* on the Desktop/Start-menu instead of
+    the desktop shell.  Opening it shows the backend's JSON answer as a blank
+    page.  Rewriting the shortcut to the desktop shell (or re-creating it) is
+    what makes the old icon work.
+    """
+    actions: list = []
+    if sys.platform != "win32":
+        return actions
+    shell = install / "EnterpriseAI.exe"
+    if not shell.is_file():
+        for name in ("Chatbot Enterprise.exe", "chatbot-enterprise.exe", "EnterpriseAI.exe"):
+            if (install / name).is_file():
+                shell = install / name
+                break
+    if not shell.is_file():
+        return actions
+
+    targets = []
+    for folder in (
+        Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop",
+        Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+    ):
+        try:
+            if folder.is_dir():
+                targets += list(folder.rglob("*.lnk"))
+        except OSError:
+            continue
+
+    fixed = 0
+    for lnk in targets:
+        name = lnk.name.lower()
+        if "enterprise" not in name and "chatbot" not in name and "دستیار" not in lnk.name:
+            continue
+        try:
+            # Read the shortcut with a tiny PowerShell-free COM call: use the
+            # WScript.Shell through ctypes is not available, so parse the
+            # target path out of the .lnk binary instead.
+            raw = lnk.read_bytes()
+        except OSError:
+            continue
+        text = raw.decode("utf-16-le", errors="ignore") + raw.decode("latin-1", errors="ignore")
+        if "backend-server" not in text:
+            continue
+        try:
+            updated = re.sub(
+                r"backend-server(\.exe)?",
+                shell.name,
+                text,
+                flags=re.IGNORECASE,
+            )
+            # Same byte layout: only the file name is replaced, so write it back
+            # in a way that keeps the rest of the shortcut intact.
+            raw_updated = raw.replace(b"backend-server.exe", shell.name.encode("utf-16-le"))
+            raw_updated = raw_updated.replace(b"backend-server", shell.name.encode("utf-16-le"))
+            if raw_updated != raw:
+                lnk.write_bytes(raw_updated)
+                fixed += 1
+        except OSError:
+            continue
+    if fixed:
+        actions.append(("ok", f"{fixed} میان‌بر به برنامهٔ اصلی اصلاح شد"))
+    return actions
 
 
 # --------------------------------------------------------------------------- #

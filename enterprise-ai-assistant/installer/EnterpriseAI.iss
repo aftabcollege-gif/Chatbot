@@ -104,8 +104,9 @@ Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{userappdata}\EnterpriseAI"; Check: ShouldDeleteData
 
 [Code]
-; Windows API used for the (non-blocking) RAM warning below.  Without this
-; declaration ISCC aborts with "Unknown identifier".
+// Windows API used for the (non-blocking) RAM warning below.  The [Code]
+// section is Delphi/Pascal, so comments use // (a leading ';' is a syntax
+// error there, even though the rest of the .iss file uses ';').
 function GetPhysicallyInstalledSystemMemory(var TotalMemoryInKilobytes: Cardinal): Boolean;
   external 'GetPhysicallyInstalledSystemMemory@kernel32.dll stdcall';
 
