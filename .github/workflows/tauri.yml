@@ -222,15 +222,29 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-release | Out-Null
-          Copy-Item dist-installer\setup.exe dist-release\setup.exe -Force
-          $msi = Get-ChildItem desktop\src-tauri\target\release\bundle\msi -Filter "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($msi) { Copy-Item $msi.FullName "dist-release\EnterpriseAI-$($msi.Name)" -Force }
-          Copy-Item frontend\dist\index.html dist-release\frontend-index.html -Force
-          Get-ChildItem dist-release | Select-Object Name,Length | Format-Table -AutoSize
-          Get-FileHash dist-release\* -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
-            Out-File dist-release\SHA256SUMS.txt -Encoding ascii
-          Get-Content dist-release\SHA256SUMS.txt
+          $files = @()
+          if (!(Test-Path "dist-installer\setup.exe")) { throw "setup.exe missing in dist-installer" }
+          Copy-Item "dist-installer\setup.exe" "dist-release\setup.exe" -Force
+          $files += "dist-release\setup.exe"
+
+          # The Tauri MSI is a bonus; it must never break the release.
+          $msiDir = "desktop\src-tauri\target\release\bundle\msi"
+          if (Test-Path $msiDir) {
+            $msi = Get-ChildItem -LiteralPath $msiDir -Filter "*.msi" -File -ErrorAction SilentlyContinue |
+                     Select-Object -First 1
+            if ($msi) {
+              Copy-Item -LiteralPath $msi.FullName -Destination "dist-release\EnterpriseAI.msi" -Force
+              $files += "dist-release\EnterpriseAI.msi"
+            }
+          }
+
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLower()
+            "$hash  $([IO.Path]::GetFileName($f))"
+          }
+          $lines | Out-File "dist-release\SHA256SUMS.txt" -Encoding ascii
+          Get-ChildItem dist-release | Select-Object Name, Length | Format-Table -AutoSize
+          $lines
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -250,5 +264,5 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             enterprise-ai-assistant/dist-release/setup.exe
-            enterprise-ai-assistant/dist-release/EnterpriseAI-*.msi
+            enterprise-ai-assistant/dist-release/EnterpriseAI.msi
             enterprise-ai-assistant/dist-release/SHA256SUMS.txt
