@@ -119,10 +119,10 @@ jobs:
         run: |
           cd desktop
           npm install
-          # The frontend is already built above; clear beforeBuildCommand so the
-          # Tauri CLI cannot recursively invoke `npm run build` (= tauri build).
-          $cfg = '{"build":{"beforeBuildCommand":""}}'
-          $out = npx tauri build --config $cfg 2>&1 | Out-String
+          # tauri.conf.json's beforeBuildCommand now builds the frontend itself
+          # ('npm --prefix ../frontend run build') instead of recursing into
+          # desktop's own 'tauri build' script.
+          $out = npx tauri build 2>&1 | Out-String
           $code = $LASTEXITCODE
           $out | Write-Host
           if ($env:GITHUB_STEP_SUMMARY) {
@@ -132,10 +132,18 @@ jobs:
             Add-Content $env:GITHUB_STEP_SUMMARY "``````"
           }
           if ($code -ne 0) {
-            # Not every network can read the Actions log stream, so keep the
-            # tail readable from the branch itself.
-            New-Item -ItemType Directory -Force -Path ..\.ci | Out-Null
-            ($out -split "`n") | Select-Object -Last 200 | Out-File ..\.ci\tauri-build-tail.txt -Encoding utf8
+            # The Actions log stream is not reachable from every network, so
+            # surface the interesting lines as a workflow annotation (readable
+            # through the REST API) and keep the full tail in the summary.
+            $interesting = ($out -split "`n") |
+              Where-Object { $_ -match "error|Error|failed|cannot|not found|No such|denied|panicked" } |
+              Where-Object { $_ -notmatch "^\s*$" } |
+              Select-Object -Last 15
+            $one = (($interesting -join " | ") -replace "`r", "")
+            if ($one.Length -gt 950) { $one = $one.Substring($one.Length - 950) }
+            if (-not $one) { $one = ($out -split "`n" | Select-Object -Last 5) -join " | " }
+            Write-Host "::error::tauri build (exit $code): $one"
+            if ($env:GITHUB_STEP_SUMMARY) { Add-Content $env:GITHUB_STEP_SUMMARY "error: $one" }
             throw "tauri build failed ($code)"
           }
 
