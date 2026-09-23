@@ -104,6 +104,11 @@ Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{userappdata}\EnterpriseAI"; Check: ShouldDeleteData
 
 [Code]
+; Windows API used for the (non-blocking) RAM warning below.  Without this
+; declaration ISCC aborts with "Unknown identifier".
+function GetPhysicallyInstalledSystemMemory(var TotalMemoryInKilobytes: Cardinal): Boolean;
+  external 'GetPhysicallyInstalledSystemMemory@kernel32.dll stdcall';
+
 function ShouldDeleteData: Boolean;
 begin
   Result := MsgBox('آیا داده‌های کاربر (پایگاه داده و اسناد) هم حذف شوند؟', mbConfirmation, MB_YESNO) = IDYES;
