@@ -49,10 +49,12 @@ FALLBACK_PORT = 8751
 #: approve either closing the previous copy or moving to the alternative port.
 PORT_NOT_AVAILABLE_EXIT = 4
 
-BANNER = r"""
+BANNER = rf"""
 ================================================================
    دستیار هوشمند سازمانی  —  نسخهٔ تعمیر و اجرای آفلاین
    Chatbot Enterprise offline launcher / repair  (mini)
+   آدرس پیش‌فرض: http://127.0.0.1:{APP_PORT}
+   (پورت فقط با تأیید شما عوض می‌شود)
 ================================================================
 """
 
