@@ -112,7 +112,7 @@ function GetPhysicallyInstalledSystemMemory(var TotalMemoryInKilobytes: Cardinal
 
 function ShouldDeleteData: Boolean;
 begin
-  Result := MsgBox('آیا داده‌های کاربر (پایگاه داده و اسناد) هم حذف شوند؟', MB_YESNO or MB_ICONQUESTION, MB_DEFBUTTON1) = IDYES;
+  Result := MsgBox('آیا داده‌های کاربر (پایگاه داده و اسناد) هم حذف شوند؟', mbConfirmation, MB_YESNO) = IDYES;
 end;
 
 function InitializeSetup(): Boolean;
@@ -124,6 +124,6 @@ begin
   RamMB := 0;
   if GetPhysicallyInstalledSystemMemory(RamMB) then begin
     if RamMB < 7*1024*1024 then
-      MsgBox('هشدار: حداقل ۸ گیگابایت رم پیشنهاد می‌شود.', MB_OK or MB_ICONWARNING, MB_OK);
+      MsgBox('هشدار: حداقل ۸ گیگابایت رم پیشنهاد می‌شود.', MB_OK, MB_OK);
   end;
 end;
