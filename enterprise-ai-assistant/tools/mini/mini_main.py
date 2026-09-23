@@ -25,6 +25,8 @@ from pathlib import Path
 
 APP_PORT = 8741
 LLM_PORT = 8742
+#: fixed fallback (never a shifting number: the address must stay predictable)
+FALLBACK_PORT = 8751
 
 BANNER = r"""
 ================================================================
@@ -326,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         find_installations,
         fix_installed_shortcuts,
         free_ports,
+        port_owner,
         persist_asset_environment,
         repair_database,
         repair_installation,
@@ -334,11 +337,45 @@ def main(argv: list[str] | None = None) -> int:
     installs = [] if (args.serve_only and not args.repair_report) else find_installations()
     install = installs[0] if installs else None
 
-    if not args.serve_only or args.repair_report:
-        try:
-            free_ports([8741, 8742, APP_PORT], log=print)
-        except Exception as exc:
-            print(f"    [!] بستن نسخه‌های قبلی ممکن نشد: {exc!r}")
+    # Port policy: always the application's own port (8741) unless the user
+    # agrees otherwise.  A previous copy of the app holding that port is *never*
+    # closed without asking, and the fallback port is a fixed one so the address
+    # does not change from run to run.
+    def choose_port(preferred: int) -> int:
+        """Return the port to serve on, asking before touching anything."""
+        if args.port != APP_PORT:
+            return args.port  # an explicit --port was given
+        if port_free(preferred):
+            return preferred
+        owner = port_owner(preferred) if "port_owner" in dir() else {}
+        name = (owner or {}).get("exe") or "برنامهٔ دیگری"
+        print("")
+        print(f"    [!] پورت {preferred} در حال استفاده است ({name}).")
+        if (owner or {}).get("ours"):
+            print("        این برنامهٔ نصب‌شدهٔ خودتان است (نسخهٔ قبلی).")
+            answer = _ask_with_timeout(
+                f"    [؟] نسخهٔ قبلی بسته شود تا روی پورت {preferred} اجرا شود؟\n"
+                f"        برای «بله» عدد 1 و Enter، برای «خیر» فقط Enter (۱۲ ثانیه): ",
+                seconds=20,
+            )
+            if answer.strip() in {"1", "۱", "y", "yes", "بله"}:
+                free_ports([preferred], log=print)
+                if port_free(preferred):
+                    print(f"    [✓] نسخهٔ قبلی بسته شد؛ روی پورت {preferred} اجرا می‌شود.")
+                    return preferred
+                print(f"    [!] پورت {preferred} همچنان آزاد نشد.")
+            else:
+                print("    [i] نسخهٔ قبلی دست‌نخورده ماند.")
+        else:
+            print("    [i] برای بستن آن، از کاربر اجازه گرفته نمی‌شود.")
+        print(f"    [i] برنامه روی پورت ثابت {FALLBACK_PORT} اجرا می‌شود.")
+        print("        (برای پر کردن جا، ابتدا آن برنامه را ببندید و این فایل را دوباره اجرا کنید.)")
+        return FALLBACK_PORT
+
+    try:
+        APP_PORT = choose_port(APP_PORT)
+    except Exception as exc:
+        print(f"    [!] انتخاب پورت با خطا مواجه شد: {exc!r}")
 
     print("۱) بررسی نسخهٔ نصب‌شده ...")
     if args.repair_report:
@@ -447,11 +484,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not port_free(APP_PORT):
-        print(f"[!] پورت {APP_PORT} اشغال است؛ روی پورت دیگری تلاش می‌شود.")
-        for candidate in range(APP_PORT + 1, APP_PORT + 20):
-            if port_free(candidate):
-                APP_PORT = candidate
-                break
+        # Last resort only: the user already agreed to the fallback port.
+        print(f"[!] پورت {APP_PORT} آزاد نیست؛ روی پورت ثابت {FALLBACK_PORT} ادامه می‌دهیم.")
+        APP_PORT = FALLBACK_PORT
 
     configure_environment(install, directory)
     start_llm(install, log=print)

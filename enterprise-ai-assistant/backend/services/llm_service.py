@@ -74,6 +74,35 @@ class LLMSession:
                         continue
 
 
+    async def complete(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+    ) -> str:
+        """One-shot completion (no streaming).
+
+        Used for the small helper tasks the chat pipeline needs — rewriting a
+        follow-up question into a standalone one, for example — where the whole
+        answer has to be parsed before continuing.
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        async with httpx.AsyncClient(timeout=min(self.timeout, 60.0)) as client:
+            resp = await client.post(f"{self.base_url}/chat/completions", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        try:
+            return (data["choices"][0]["message"]["content"] or "").strip()
+        except (KeyError, IndexError, TypeError):
+            return ""
+
+
 # --------------------------------------------------------------------------- #
 # Offline extractive fallback
 # --------------------------------------------------------------------------- #

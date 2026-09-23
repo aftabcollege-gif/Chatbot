@@ -623,6 +623,49 @@ def _spare_port(start: int = 8790) -> int:
     return start
 
 
+def port_owner(port: int) -> Dict[str, Any]:
+    """Identify the process listening on *port* (Windows, best effort)."""
+    info: Dict[str, Any] = {"pid": None, "exe": "", "ours": False}
+    if sys.platform != "win32":
+        return info
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=20
+        )
+    except Exception:
+        return info
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        if not parts[1].endswith(f":{port}"):
+            continue
+        if parts[3].upper() not in ("LISTENING", "ESTABLISHED", "CLOSE_WAIT"):
+            continue
+        try:
+            info["pid"] = int(parts[-1])
+        except ValueError:
+            return info
+        break
+    if info["pid"]:
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {info['pid']}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=20,
+            )
+            first = completed.stdout.strip().splitlines()
+            if first:
+                name = first[0].split(",")[0].strip('"')
+                info["exe"] = name
+                info["ours"] = any(
+                    token in name.lower()
+                    for token in ("backend-server", "enterpriseai", "chatbot", "llama-server", "python")
+                )
+        except Exception:
+            pass
+    return info
+
+
 def free_ports(ports: List[int] = None, log=print) -> list:
     """Stop leftover copies of the app's own backend/shell holding its ports.
 

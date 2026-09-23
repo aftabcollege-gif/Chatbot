@@ -18,6 +18,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from core import database as db
 from core.config import settings
 from services.embedding_service import get_embedding_service
+from services.query_context_service import standalone_query
 from services.reranker_service import get_reranker_service
 from services import llm_service
 from utils.persian import detect_language, normalize_persian, tokenize
@@ -190,6 +191,18 @@ def _rrf_merge(*ranked_lists: List[List[Any]], k: int = 60) -> Dict[Any, float]:
             key = item if not isinstance(item, dict) else item.get("key")
             scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
     return scores
+
+
+async def resolve_query(
+    question: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    language: str = "fa",
+) -> Dict[str, Any]:
+    """Make *question* self-contained using the conversation (never raises)."""
+    try:
+        return await standalone_query(question, history, language)
+    except Exception:
+        return {"query": question, "rewritten": False, "method": "none"}
 
 
 def retrieve(
@@ -434,7 +447,22 @@ async def answer_stream(
 ) -> AsyncIterator[Dict[str, Any]]:
     """Full RAG streaming pipeline. Yields SSE-style event dicts."""
     language = detect_language(question)
-    chunks = retrieve(question, user, scope=scope, scope_id=scope_id)
+
+    # A follow-up ("برای مدیران هم همینطور است؟") carries no subject of its own;
+    # resolve it against the conversation first, then retrieve with the
+    # standalone wording.
+    resolved = await resolve_query(question, history, language)
+    if resolved["rewritten"]:
+        yield {
+            "type": "query",
+            "query": resolved["query"],
+            "method": resolved["method"],
+            "original": question,
+        }
+
+    chunks = retrieve(
+        resolved["query"], user, scope=scope, scope_id=scope_id
+    )
     sources = sources_payload(chunks)
     yield {"type": "sources", "sources": sources}
 
