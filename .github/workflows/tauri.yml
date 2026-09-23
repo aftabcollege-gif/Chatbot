@@ -131,7 +131,38 @@ jobs:
             Add-Content $env:GITHUB_STEP_SUMMARY (($out -split "`n" | Select-Object -Last 60) -join "`n")
             Add-Content $env:GITHUB_STEP_SUMMARY "``````"
           }
-          if ($code -ne 0) { throw "tauri build failed ($code)" }
+          if ($code -ne 0) {
+            # Not every network can read the Actions log stream, so keep the
+            # tail readable from the branch itself.
+            New-Item -ItemType Directory -Force -Path ..\.ci | Out-Null
+            ($out -split "`n") | Select-Object -Last 200 | Out-File ..\.ci\tauri-build-tail.txt -Encoding utf8
+            throw "tauri build failed ($code)"
+          }
+
+      - name: Normalise the desktop binary name (EnterpriseAI.exe)
+        shell: pwsh
+        run: |
+          $release = "desktop\src-tauri\target\release"
+          $exe = Get-ChildItem $release -Filter "*.exe" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -notmatch "build-script|backend-server|llama-server" } |
+                   Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $exe) { throw "no desktop executable found in $release" }
+          if ($exe.Name -ne "EnterpriseAI.exe") {
+            Copy-Item $exe.FullName "$release\EnterpriseAI.exe" -Force
+          }
+          Get-ChildItem $release -Filter "*.exe" | Select-Object Name,Length | Format-Table -AutoSize
+          Write-Host ("target release contains EnterpriseAI.exe: " + (Test-Path (Join-Path $release "EnterpriseAI.exe")))
+
+      - name: Keep the build log on the branch (diagnostics)
+        if: failure()
+        shell: pwsh
+        run: |
+          if (!(Test-Path ..\.ci)) { return }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ..\.ci
+          git commit -q -m "ci: tauri build diagnostics [skip ci]" 2>$null
+          git push origin "HEAD:${{ github.ref_name }}" 2>$null
 
       - name: Build EnterpriseAI setup.exe (Inno Setup)
         id: iscc
