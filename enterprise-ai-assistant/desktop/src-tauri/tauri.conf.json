@@ -48,8 +48,7 @@
       "nsis": {
         "installMode": "perMachine",
         "languages": [
-          "English",
-          "Persian"
+          "English"
         ]
       }
     }

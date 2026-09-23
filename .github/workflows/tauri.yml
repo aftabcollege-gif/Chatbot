@@ -122,7 +122,11 @@ jobs:
           # tauri.conf.json's beforeBuildCommand now builds the frontend itself
           # ('npm --prefix ../frontend run build') instead of recursing into
           # desktop's own 'tauri build' script.
-          $out = npx tauri build 2>&1 | Out-String
+          # --no-bundle: build the executable only.  The customer-facing
+          # installer is the Inno one below; the Tauri bundlers (NSIS/WiX) are
+          # a nice extra and are attempted separately so they can never block
+          # the deliverable.
+          $out = npx tauri build --no-bundle 2>&1 | Out-String
           $code = $LASTEXITCODE
           $out | Write-Host
           if ($env:GITHUB_STEP_SUMMARY) {
@@ -145,6 +149,16 @@ jobs:
             Write-Host "::error::tauri build (exit $code): $one"
             if ($env:GITHUB_STEP_SUMMARY) { Add-Content $env:GITHUB_STEP_SUMMARY "error: $one" }
             throw "tauri build failed ($code)"
+          }
+
+      - name: Try the MSI bundle (best effort)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cd desktop
+          npx tauri build --bundles msi 2>&1 | Select-Object -Last 25 | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::MSI bundling failed; setup.exe (Inno) is unaffected"
           }
 
       - name: Normalise the desktop binary name (EnterpriseAI.exe)
