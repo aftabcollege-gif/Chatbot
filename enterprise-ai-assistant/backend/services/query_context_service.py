@@ -116,6 +116,13 @@ def _is_followup(question: str, history: Optional[List[Dict[str, str]]] = None) 
     shares_topic = bool(_content_words(text) & _content_words(previous)) if previous else False
     if len(text.split()) <= _SHORT_QUESTION_WORDS and (shares_topic or not previous):
         return True
+    # A very short question that *contains* an anaphoric word ("مدیران چطور؟")
+    # has no subject of its own either, even when it shares no word with the
+    # previous question.
+    if len(text.split()) <= _SHORT_QUESTION_WORDS and any(
+        opener in text for opener in _ANAPHORIC_OPENERS
+    ):
+        return True
     return False
 
 

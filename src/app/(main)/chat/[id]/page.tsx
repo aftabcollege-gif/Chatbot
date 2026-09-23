@@ -84,6 +84,10 @@ export default function ChatConversationPage({ params }: { params: Promise<{ id:
             confidenceScore: data.assistantMessage.confidenceScore,
             createdAt: data.assistantMessage.createdAt,
             sources: data.assistantMessage.sources,
+            // A follow-up question is searched as a standalone query; show the
+            // user which question the answer actually refers to.
+            resolvedQuery: data.resolvedQuery,
+            queryMethod: data.queryMethod,
           },
         ]);
         

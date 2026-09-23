@@ -77,6 +77,13 @@ jobs:
           npm ci
           npm run build
 
+      - name: Unit tests (port policy + follow-up questions)
+        shell: pwsh
+        run: |
+          # No third-party import is needed: both suites run on the standard
+          # library alone, so they guard the behaviour even if a wheel fails.
+          python -m unittest discover -s tests -p "test_*.py" -v
+
       - name: Build the single-file EXE
         shell: pwsh
         run: |
@@ -134,6 +141,56 @@ jobs:
           }
           Get-Content $report
 
+      - name: Smoke test the port policy (the address must not move)
+        id: port_smoke
+        shell: pwsh
+        run: |
+          # Reported problem: "every time I run the mini file the port changes".
+          # This test pins the policy down:
+          #   1) a plain run serves on the application's own port (8741);
+          #   2) a second run while the port is busy must NOT move elsewhere,
+          #      must NOT close the running copy and must exit with code 4.
+          $exe = "dist\Chatbot-Enterprise-Mini.exe"
+          $first = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
+            -RedirectStandardOutput "dist\port-first-stdout.txt" -RedirectStandardError "dist\port-first-stderr.txt"
+
+          $ok = $false
+          for ($i = 0; $i -lt 45; $i++) {
+            try {
+              $r = Invoke-WebRequest "http://127.0.0.1:8741/api/health" -UseBasicParsing -TimeoutSec 3
+              $ok = $true
+              break
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if (-not $ok) {
+            try { Stop-Process -Id $first.Id -Force } catch {}
+            Get-Content "dist\port-first-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 40
+            throw "the launcher did not serve the default port 8741"
+          }
+          Write-Host "default port 8741 answered /api/health"
+
+          # Second run, no interactive console: the launcher must refuse to move.
+          $second = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
+            -RedirectStandardInput "NUL" `
+            -RedirectStandardOutput "dist\port-second-stdout.txt" -RedirectStandardError "dist\port-second-stderr.txt"
+          $null = $second.WaitForExit(180000)
+          $code = $second.ExitCode
+          Get-Content "dist\port-second-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 25
+
+          $moved = $false
+          foreach ($port in 8751, 8752, 8753, 8742) {
+            try {
+              Invoke-WebRequest "http://127.0.0.1:$port/api/health" -UseBasicParsing -TimeoutSec 3 | Out-Null
+              $moved = $true
+              Write-Host "::error::the launcher silently served on port $port"
+            } catch {}
+          }
+          try { Stop-Process -Id $first.Id -Force } catch {}
+
+          if ($moved) { throw "the port moved without the user's approval" }
+          if ($code -ne 4) { throw "a run with a busy port must exit with code 4 (got $code)" }
+          Write-Host "port policy honoured: no silent port change, exit code 4"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -144,6 +201,10 @@ jobs:
             enterprise-ai-assistant/dist/smoke-report.txt
             enterprise-ai-assistant/dist/serve-stdout.txt
             enterprise-ai-assistant/dist/serve-stderr.txt
+            enterprise-ai-assistant/dist/port-first-stdout.txt
+            enterprise-ai-assistant/dist/port-first-stderr.txt
+            enterprise-ai-assistant/dist/port-second-stdout.txt
+            enterprise-ai-assistant/dist/port-second-stderr.txt
           retention-days: 30
 
       - name: Publish the smoke report on failure (diagnostics)
@@ -171,14 +232,15 @@ jobs:
           if ($report -notmatch "/api/health: 200") { throw "the application did not answer /api/health:$report" }
 
       - name: Publish to the rolling release (stable download link)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: mini-latest
-          target_commitish: ${{ github.sha }}
-          name: "نسخهٔ کوچک تعمیر و اجرا (Mini)"
-          make_latest: false
-          fail_on_unmatched_files: true
-          body: |
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # softprops/action-gh-release reports success but SKIPS an asset whose
+          # name already exists — that is how the download link kept serving an
+          # older, broken mini EXE.  The CLI with --clobber really replaces it.
+          $release = "mini-latest"
+          $notes = @'
             ## فایل کوچک تعمیر و اجرا — Chatbot Enterprise Mini
 
             یک فایل EXE کوچک (بدون نیاز به cmd یا PowerShell و بدون دسترسی مدیر):
@@ -187,10 +249,22 @@ jobs:
                (صفحهٔ سفید، افزونهٔ برداری و ساخت/بازنشانی رمز مدیر)
             2. سپس خود برنامه را در مرورگر باز می‌کند.
 
+            پورت پیش‌فرض همان پورت خود برنامه (۸۷۴۱) است و بدون تأیید شما
+            عوض نمی‌شود.
+
             پس از اجرا، نام کاربری و رمز عبور مدیر در همین پنجره نمایش داده
             می‌شود و در فایل `ADMIN-CREDENTIALS.txt` ذخیره می‌گردد.
 
             دانلود: `Chatbot-Enterprise-Mini.exe`
-          files: |
-            enterprise-ai-assistant/dist/Chatbot-Enterprise-Mini.exe
-            enterprise-ai-assistant/dist/SHA256SUMS.txt
+          '@
+          $notes | Out-File dist\release-notes.md -Encoding utf8
+
+          gh release view $release *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $release --title "نسخهٔ کوچک تعمیر و اجرا (Mini)" `
+              --notes-file dist\release-notes.md --target ${{ github.sha }} --latest=false
+          } else {
+            gh release edit $release --notes-file dist\release-notes.md
+          }
+          gh release upload $release dist\Chatbot-Enterprise-Mini.exe dist\SHA256SUMS.txt --clobber
+          gh release view $release --json assets -q '.assets[] | "\(.name)  \(.size) bytes  \(.createdAt)"'
