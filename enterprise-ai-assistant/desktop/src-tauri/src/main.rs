@@ -101,8 +101,10 @@ fn start_llm(app: &tauri::AppHandle) -> Option<Child> {
         "127.0.0.1".into(),
         "--port".into(),
         LLM_PORT.to_string(),
+        // 8192 tokens shared by --parallel 2 => 4096 per request, matching
+        // llm.context_size in config/default.yaml and the backend prompt budget.
         "--ctx-size".into(),
-        "4096".into(),
+        "8192".into(),
         "--threads".into(),
         threads.clone(),
         "--parallel".into(),

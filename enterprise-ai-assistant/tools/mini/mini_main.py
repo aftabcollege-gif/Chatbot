@@ -208,7 +208,9 @@ def start_llm(install: Path | None, log=print):
                 "--model", str(model),
                 "--host", "127.0.0.1",
                 "--port", str(LLM_PORT),
-                "--ctx-size", "4096",
+                # 8192 tokens shared by --parallel 2 => 4096 per request, which
+                # is what the backend plans its prompt against.
+                "--ctx-size", "8192",
                 "--threads", str(max(2, (os.cpu_count() or 4))),
                 "--parallel", "2",
             ],

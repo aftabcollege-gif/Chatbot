@@ -5,6 +5,29 @@ This patch replaces the sqlite-vec vector extension with a pure-numpy in-memory
 vector index so the chatbot works out of the box without needing an external
 vec0.dll.
 
+This revision (v1.0.8-r2) also fixes the answer-quality problems reported in
+chat: wrong/duplicated sources, a repeated section, and "LLM stream error"
+when the answer was generated. It does that by replacing the retrieval and
+generation modules with fixed versions:
+
+  - نیم‌فاصله (ZWNJ): a word written with or without نیم‌فاصله now finds the
+    other spelling ("می‌شود" / "می شود"), and common words like «فرآیند»,
+    «توضیح» or «مختصر» no longer match every document.
+  - Sources: only chunks that really contain the question's distinctive words
+    (or are semantically close) are cited; one document can contribute at most
+    two chunks and duplicate/overlapping passages are merged, so the same file
+    no longer appears four times.
+  - Repeated sections: the same sentence is never repeated in the answer.
+  - «LLM stream error»: every request is planned against the model's real
+    context window (and the request is retried with a smaller context or, if
+    the model is unavailable, answered from the retrieved text), so the chat
+    always returns an answer instead of a raw error.
+
+You do NOT need to re-upload your documents for these fixes. Only run
+Reset-Setup.bat if you are installing the patch for the first time (or you hit
+the /setup redirect loop); if you want a clean index because your library
+changed a lot, run Reset-Setup.bat and upload the documents again.
+
 ---------------------------------------------------------------
 INSTALL  (double-click only - NO cmd / PowerShell needed)
 ---------------------------------------------------------------
@@ -40,6 +63,6 @@ Contents of this folder:
   ChatbotEnterprise-Patch-v1.0.8.exe   - applies the patch (double-click)
   Reset-Setup.exe                      - deletes enterprise.db so /setup appears
   Diag-Patch.exe                       - writes a diagnostic log
-  Test-Patch.exe                       - runs a numpy-vector test
+  Test-Patch.exe                       - runs a numpy-vector + answer-quality test
   patch-files/                         - the actual patched Python modules
   *.bat                                - underlying scripts (used by the EXEs)

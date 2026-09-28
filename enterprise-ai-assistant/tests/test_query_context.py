@@ -82,8 +82,14 @@ class FollowUpDetectionTests(unittest.TestCase):
 class StandaloneQueryTests(unittest.TestCase):
     def _run(self, question, history=HISTORY, reply=None, available=True):
         module, calls = _stub_llm(reply, available)
+        package = sys.modules.get("services")
         original = sys.modules.get("services.llm_service")
+        original_attr = getattr(package, "llm_service", None) if package else None
         sys.modules["services.llm_service"] = module
+        # ``from services import llm_service`` reads the attribute of the
+        # package once it has been imported anywhere — patch both.
+        if package is not None:
+            setattr(package, "llm_service", module)
         try:
             result = asyncio.run(qcs.standalone_query(question, history))
         finally:
@@ -91,6 +97,14 @@ class StandaloneQueryTests(unittest.TestCase):
                 sys.modules.pop("services.llm_service", None)
             else:
                 sys.modules["services.llm_service"] = original
+            if package is not None:
+                if original_attr is None:
+                    try:
+                        delattr(package, "llm_service")
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(package, "llm_service", original_attr)
         return result, calls
 
     def test_heuristic_carries_the_previous_subject(self):

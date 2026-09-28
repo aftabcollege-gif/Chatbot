@@ -1,226 +1,85 @@
 """LLM service.
 
 Talks to a locally running llama.cpp ``llama-server`` (OpenAI-compatible
-``/v1/chat/completions``) when available. On startup the backend scans the
-``models/llm/`` directory for any ``*.gguf`` file and auto-selects the
-strongest model present, preferring larger parameter counts and instruct-
-tuned variants. If the Electron launcher started llama-server with a
-weaker model (e.g. the default 1.5B), this service kills it and re-spawns
-llama-server with the best model it found. If no server is reachable at
-all, it falls back to an extractive answerer so the chat still works 100%
-offline with zero model downloads.
+``/v1/chat/completions``) when available. If the server is not reachable (e.g.
+during the offline demo before models are placed, or on a low-resource machine),
+it falls back to a fully local, dependency-free *extractive* answerer that
+composes an answer directly from the retrieved RAG context. This guarantees the
+chat experience — including streaming and citations — works 100% offline with
+zero model downloads, while the real Qwen model is used automatically whenever
+``llama-server.exe`` is running on the Windows install.
+
+Context budget
+--------------
+``llama-server`` is started with ``--ctx-size 8192 --parallel 2``, i.e. 4096
+tokens per request slot. A prompt that does not fit is rejected with HTTP 400 —
+which used to surface in the UI as «LLM stream error». Therefore:
+
+* every request is planned against :attr:`settings.llm_slot_tokens` *before* it
+  is sent (see :meth:`LLMSession.plan`), and
+* a rejected request is retried once with the optional sampling extensions
+  removed, then the caller trims the context and retries
+  (:class:`ContextOverflowError`), and only then does the answer degrade to the
+  extractive mode — the user never sees a bare error instead of an answer.
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import re
-import subprocess
-import sys
-from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
 from core.config import settings
 from utils.persian import (
     approximate_tokens,
+    content_terms,
     normalize_persian,
-    remove_stopwords,
     tokenize,
+    truncate_words,
 )
 
-
-# --------------------------------------------------------------------------- #
-# Model auto-selection
-# --------------------------------------------------------------------------- #
-
-# Rank model filenames by quality so the biggest capable Instruct model wins.
-# Order: larger param count > smaller; "instruct" > "chat" > base; Q4_K_M > Q4_K_S > Q3.
-_PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*b", re.IGNORECASE)
-_QUALITY_RE = re.compile(r"(q[2-8]_k_[ms]|iq[2-4]_xs?|f16|q8_0)", re.IGNORECASE)
-_QUANT_RANK = {
-    "f16": 90, "q8_0": 85, "q6_k": 75, "q5_k_m": 70, "q5_k_s": 65,
-    "q4_k_m": 60, "q4_k_s": 55, "q3_k_m": 45, "q3_k_s": 40,
-    "iq4_xs": 50, "iq3_xs": 38, "iq2_xs": 30,
-}
+#: llama.cpp accepts a few extra sampling parameters next to the OpenAI fields.
+_SAMPLING_EXTRAS: Dict[str, object] = {"top_p": 0.9, "repeat_penalty": 1.15}
 
 
-def _score_model(path: Path) -> tuple:
-    """Return a tuple sortable descending: higher = better."""
-    name = path.name.lower()
-    m = _PARAM_RE.search(name)
-    params = float(m.group(1)) if m else 0.0
-    instruct = 3 if "instruct" in name else (2 if "chat" in name else 0)
-    q = _QUALITY_RE.search(name)
-    qrank = _QUANT_RANK.get(q.group(1).lower(), 50) if q else 50
-    # Prefer single-file models over shards.
-    single = 1 if ("-of-" not in name or "-00001-of-" in name) else 0
-    # Prefer qwen2.5 family.
-    family = 2 if "qwen2.5" in name else (1 if "qwen2" in name else 0)
-    return (params, instruct, qrank, family, single, path.stat().st_size)
+def _setting(name: str, default):
+    """Read a config value, tolerating an older ``core.config``.
 
-
-def _find_best_model() -> Optional[Path]:
-    search_dirs = [settings.model_abspath("models/llm")]
-    # Also look in %APPDATA%/EnterpriseAI/models/llm so users can drop new
-    # models in without touching Program Files.
-    appdata_models = settings.appdata / "models" / "llm"
-    if appdata_models.exists():
-        search_dirs.append(appdata_models)
-    candidates: List[Path] = []
-    for d in search_dirs:
-        if not d.exists():
-            continue
-        for p in d.glob("*.gguf"):
-            # Skip shard parts other than the first (llama-server loads
-            # the rest automatically when pointed at -00001-of-...).
-            if re.search(r"-0000[2-9]-of-", p.name):
-                continue
-            candidates.append(p)
-    if not candidates:
-        return None
-    candidates.sort(key=_score_model, reverse=True)
-    return candidates[0]
-
-
-def _find_llama_server() -> Optional[Path]:
-    candidates = [
-        settings.root / "llm" / "llama-server.exe",
-        settings.root / "llm" / "llama-server",
-        settings.root / "bin" / "llama-server.exe",
-        settings.root / "_internal" / "llm" / "llama-server.exe",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    # PATH fallback (dev)
-    for exe in ("llama-server.exe", "llama-server"):
-        p = shutil_which(exe)
-        if p:
-            return Path(p)
-    return None
-
-
-def shutil_which(name: str) -> Optional[str]:
-    # Lazy shutil.which import (kept out of top-level for frozen parity).
-    import shutil
-    return shutil.which(name)
-
-
-def _recommended_ctx(model_path: Path) -> int:
-    """Return a sensible ctx-size based on model size and total RAM."""
-    m = _PARAM_RE.search(model_path.name)
-    params = float(m.group(1)) if m else 1.5
-    # For 7B on a 16GB box, 8192 ctx is comfortable. For 14B+, stick to 4096.
-    if params >= 12:
-        return 4096
-    if params >= 6:
-        return 8192
-    return 4096
-
-
-def _port_in_use(host: str, port: int) -> bool:
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.3)
-        try:
-            s.connect((host, port))
-            return True
-        except OSError:
-            return False
-
-
-def _kill_existing_llama(port: int) -> None:
-    """Best-effort: kill any llama-server process listening on the port so we
-    can re-launch with the chosen model."""
-    try:
-        if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "llama-server.exe"],
-                capture_output=True, timeout=5,
-            )
-        else:
-            subprocess.run(
-                ["pkill", "-f", "llama-server"], capture_output=True, timeout=5,
-            )
-    except Exception:
-        pass
-
-
-_model_proc: Optional[subprocess.Popen] = None
-
-
-def ensure_llama_server() -> Optional[dict]:
-    """Make sure llama-server is running with the best available model.
-
-    Returns a dict {model_path, ctx_size} if successful, None otherwise.
-    Safe to call repeatedly; only re-spawns when necessary.
+    Patch builds replace only some modules, so a config key that exists in this
+    tree may be missing from the frozen one — a missing key must degrade to its
+    default, never raise ``AttributeError`` at request time.
     """
-    global _model_proc
-    exe = _find_llama_server()
-    best = _find_best_model()
-    if not exe or not best:
-        return None
+    value = getattr(settings, name, None)
+    return default if value is None else value
 
-    host = settings.get("llm.server_host", "127.0.0.1")
-    port = int(settings.get("llm.server_port", 8742))
-    ctx = _recommended_ctx(best)
-    threads = str(max(2, (os.cpu_count() or 4)))
 
-    # Probe existing server to see which model it loaded.
-    current_model: Optional[str] = None
-    try:
-        r = httpx.get(f"http://{host}:{port}/v1/models", timeout=2.0)
-        if r.status_code == 200:
-            data = r.json()
-            models = data.get("data", [])
-            if models:
-                current_model = models[0].get("id")
-    except Exception:
-        pass
+class ContextOverflowError(RuntimeError):
+    """The prompt does not fit into the llama-server slot."""
 
-    # If already serving the right model (filename matches), leave it alone.
-    if current_model and best.name.lower() in current_model.lower():
-        return {"model_path": str(best), "ctx_size": ctx}
-
-    # Otherwise (wrong model or not running), kill any existing and launch.
-    _kill_existing_llama(port)
-    import time as _t
-    _t.sleep(1.0)
-    try:
-        _model_proc = subprocess.Popen(
-            [
-                str(exe),
-                "--model", str(best),
-                "--host", host,
-                "--port", str(port),
-                "--ctx-size", str(ctx),
-                "--threads", threads,
-                "--parallel", "2",
-                "--flash-attn",
-            ],
-            cwd=str(exe.parent),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+    def __init__(self, prompt_tokens: int, slot_tokens: int) -> None:
+        super().__init__(
+            f"prompt needs {prompt_tokens} tokens but the model slot has {slot_tokens}"
         )
-    except Exception as exc:
-        print(f"[llm] failed to spawn llama-server: {exc}")
-        return None
+        self.prompt_tokens = prompt_tokens
+        self.slot_tokens = slot_tokens
 
-    # Wait until healthy (up to ~60s for a cold 7B load).
-    for _ in range(120):
-        _t.sleep(0.5)
-        try:
-            r = httpx.get(f"http://{host}:{port}/health", timeout=1.0)
-            if r.status_code == 200:
-                print(f"[llm] serving {best.name} ctx={ctx}")
-                return {"model_path": str(best), "ctx_size": ctx}
-        except Exception:
-            continue
-    print("[llm] llama-server did not become healthy")
-    return None
+
+class LLMRequestError(RuntimeError):
+    """llama-server answered with an error status."""
+
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"llama-server HTTP {status}: {body[:300]}")
+        self.status = status
+        self.body = body
+
+
+def estimate_tokens(messages: List[Dict[str, str]]) -> int:
+    """Cheap prompt size estimate (Persian/Latin words + role overhead)."""
+    total = 0
+    for message in messages:
+        total += approximate_tokens(str(message.get("content", "")))
+    return total + 4 * max(1, len(messages))
 
 
 class LLMSession:
@@ -231,41 +90,122 @@ class LLMSession:
         self.model = model
         self.timeout = timeout
         self._available: Optional[bool] = None
+        self._slot_tokens: Optional[int] = None
+        self._slot_probed = False
+
+    # ---- budget -----------------------------------------------------------
+    @property
+    def slot_tokens(self) -> int:
+        """Tokens one request may use.
+
+        Prefers what the running server actually reports (``/props``): the
+        shells start llama-server themselves, so the configured value can be
+        out of date — and planning against a wrong number is what produced
+        HTTP 400 «LLM stream error» before.
+        """
+        if self._slot_tokens:
+            return self._slot_tokens
+        configured = _setting("llm_slot_tokens", 0)
+        if configured:
+            return int(configured)
+        context = int(_setting("llm_context_size", 4096))
+        parallel = max(1, int(_setting("llm_parallel", 1)))
+        return max(512, context // parallel)
+
+    async def refresh_limits(self) -> None:
+        """Ask llama-server for its real context size and slot count."""
+        if self._slot_probed:
+            return
+        self._slot_probed = True
+        def _as_int(value: object) -> Optional[int]:
+            try:
+                number = int(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+            return number if number > 0 else None
+
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{self.base_url}/props")
+            if response.status_code != 200:
+                return
+            props = response.json()
+        except Exception:
+            return
+        generation = props.get("default_generation_settings") or {}
+        per_slot = _as_int(generation.get("n_ctx_per_seq")) or _as_int(props.get("n_ctx_per_seq"))
+        total = _as_int(props.get("n_ctx")) or _as_int(generation.get("n_ctx"))
+        slots = _as_int(props.get("total_slots")) or _as_int(generation.get("total_slots"))
+        if per_slot:
+            self._slot_tokens = per_slot
+        elif total and slots:
+            self._slot_tokens = max(512, total // slots)
+        elif total:
+            self._slot_tokens = total
+        if self._slot_tokens:
+            print(f"[llm] context per request: {self._slot_tokens} tokens")
+
+    def plan(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: Optional[int] = None,
+    ) -> Tuple[int, int]:
+        """Return ``(allowed_max_tokens, prompt_tokens)`` for this request.
+
+        Raises :class:`ContextOverflowError` when even a minimal answer would
+        not fit — the caller then trims the retrieved context and retries
+        instead of sending a request llama-server will reject.
+        """
+        prompt_tokens = estimate_tokens(messages)
+        slot = self.slot_tokens
+        ceiling = int(_setting("llm_max_tokens", 1024))
+        wanted = min(max_tokens or ceiling, ceiling)
+        room = slot - prompt_tokens - int(_setting("llm_reserve_tokens", 320))
+        if room < 64:
+            raise ContextOverflowError(prompt_tokens, slot)
+        return min(wanted, room), prompt_tokens
 
     async def is_available(self) -> bool:
-        if self._available is not None:
-            return self._available
-        # First: make sure a llama-server with the best model is up.
-        info = await asyncio.to_thread(ensure_llama_server)
-        if info:
-            # Pick a model name that matches what llama-server exposes.
-            model_name = Path(info["model_path"]).stem
-            self.model = model_name
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                r = await client.get(f"{self.base_url}/models")
-                self._available = r.status_code == 200
-        except Exception:
-            self._available = False
+        if self._available is None:
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    r = await client.get(f"{self.base_url}/models")
+                    self._available = r.status_code == 200
+            except Exception:
+                self._available = False
+        if self._available:
+            await self.refresh_limits()
         return self._available
 
-    async def stream_chat(
-        self, messages: List[Dict[str, str]], temperature: Optional[float] = None
-    ) -> AsyncIterator[str]:
-        payload = {
+    # ---- streaming --------------------------------------------------------
+    def _payload(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: Optional[float],
+        extras: bool,
+    ) -> Dict[str, object]:
+        payload: Dict[str, object] = {
             "model": self.model,
             "messages": messages,
             "stream": True,
             "temperature": settings.llm_temperature if temperature is None else temperature,
-            "max_tokens": settings.llm_max_tokens,
+            "max_tokens": max_tokens,
         }
+        if extras:
+            payload.update(_SAMPLING_EXTRAS)
+        return payload
+
+    async def _stream_once(
+        self, payload: Dict[str, object]
+    ) -> AsyncIterator[str]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                json=payload,
+                "POST", f"{self.base_url}/chat/completions", json=payload
             ) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", "replace")
+                    raise LLMRequestError(resp.status_code, body)
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
@@ -281,47 +221,103 @@ class LLMSession:
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
 
+    async def stream_chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> AsyncIterator[str]:
+        """Stream an answer, keeping the request inside the model's context.
+
+        A 400 is retried once without the optional sampling extensions (some
+        OpenAI-compatible servers reject them) before it is reported.
+        """
+        allowed, _ = self.plan(messages, max_tokens)
+        yielded = False
+        try:
+            async for token in self._stream_once(
+                self._payload(messages, allowed, temperature, extras=True)
+            ):
+                yielded = True
+                yield token
+            return
+        except LLMRequestError as exc:
+            if yielded or exc.status != 400:
+                raise
+            # The extras were the problem: retry with the plain OpenAI payload.
+            async for token in self._stream_once(
+                self._payload(messages, allowed, temperature, extras=False)
+            ):
+                yield token
+
+    async def complete(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+    ) -> str:
+        """One-shot completion (no streaming).
+
+        Used for the small helper tasks the chat pipeline needs — rewriting a
+        follow-up question into a standalone one, for example — where the whole
+        answer has to be parsed before continuing.
+        """
+        try:
+            allowed, _ = self.plan(messages, max_tokens)
+        except ContextOverflowError:
+            allowed = min(max_tokens, 128)
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "temperature": temperature,
+            "max_tokens": allowed,
+        }
+        async with httpx.AsyncClient(timeout=min(self.timeout, 60.0)) as client:
+            resp = await client.post(f"{self.base_url}/chat/completions", json=payload)
+            if resp.status_code >= 400:
+                raise LLMRequestError(resp.status_code, resp.text)
+            data = resp.json()
+        try:
+            return (data["choices"][0]["message"]["content"] or "").strip()
+        except (KeyError, IndexError, TypeError):
+            return ""
+
 
 # --------------------------------------------------------------------------- #
 # Offline extractive fallback
 # --------------------------------------------------------------------------- #
-
-_SENT_SPLIT = re.compile(r"(?<=[.!?؟。؟!])\s+|\n+")
-_PERSIAN_SENT = re.compile(r"[.!?؟。]")
-
-
-def _split_sentences(text: str) -> List[str]:
-    text = re.sub(r"\s*\n\s*", " \n ", text)
-    sents = [s.strip() for s in _SENT_SPLIT.split(text) if s and s.strip()]
-    return sents
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟。])\s+|\n+")
+_COMPARE_RE = re.compile(r"[\s\u200c\u200d.,،؛;:!?؟«»\"'()\[\]-]+")
 
 
-def _best_snippets(query_tokens: List[str], text: str, max_snippets: int = 2) -> List[tuple]:
-    qset = set(query_tokens)
+def _compare_key(text: str) -> str:
+    """ZWNJ/punctuation-insensitive key used to detect repeated text."""
+    return _COMPARE_RE.sub("", normalize_persian(text)).lower()
+
+
+def _best_snippet(terms: List[str], text: str) -> Tuple[str, float]:
+    """The sentence of *text* that covers the query terms best."""
+    qset = set(terms)
     if not qset:
-        return []
-    sentences = _split_sentences(text)
-    scored = []
-    for sent in sentences:
-        stoks = set(tokenize(sent))
+        return (text.strip()[:280], 0.0)
+    best, best_score = "", 0.0
+    for sentence in _SENTENCE_SPLIT.split(text or ""):
+        sentence = sentence.strip()
+        if len(sentence) < 8:
+            continue
+        stoks = set(tokenize(sentence))
         if not stoks:
             continue
         overlap = len(qset & stoks)
         if overlap == 0:
             continue
-        score = overlap / (len(qset) + len(stoks) - overlap + 1e-9)
-        scored.append((score, sent.strip()))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    out, seen = [], set()
-    for score, sent in scored:
-        key = re.sub(r"\s+", " ", sent)[:60]
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append((score, sent))
-        if len(out) >= max_snippets:
-            break
-    return out
+        score = overlap / len(qset)
+        # Prefer sentences that are not just a heading and are reasonably long.
+        score += min(len(sentence), 220) / 2200
+        if score > best_score:
+            best, best_score = sentence, score
+    return best, best_score
 
 
 async def extractive_stream(
@@ -329,11 +325,15 @@ async def extractive_stream(
     sources: List[Dict],
     history: List[Dict[str, str]],
     language: str = "fa",
+    note: Optional[str] = None,
 ) -> AsyncIterator[str]:
+    """Yield an answer composed from retrieved sources, word-by-word.
+
+    Repeated sentences/sections are dropped, so the answer never quotes the same
+    passage twice (chunk overlap used to make that happen).
+    """
     fa = language.startswith("fa")
-    q_tokens = remove_stopwords(tokenize(normalize_persian(question)))
-    if not q_tokens:
-        q_tokens = tokenize(normalize_persian(question))
+    q_terms = content_terms(question) or tokenize(normalize_persian(question))
 
     if not sources:
         noinfo = (
@@ -346,51 +346,38 @@ async def extractive_stream(
             yield word + " "
         return
 
-    per_source: List[tuple] = []
+    ranked: List[Tuple[float, str, Dict]] = []
     for src in sources:
-        snippets = _best_snippets(q_tokens, src.get("content", "") or "", max_snippets=2)
-        if not snippets:
+        snippet, score = _best_snippet(q_terms, src.get("content", ""))
+        if snippet and score > 0:
+            ranked.append((score, snippet, src))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    picked: List[Tuple[str, Dict]] = []
+    seen: List[str] = []
+    for _score, snippet, src in ranked:
+        if len(picked) >= 3:
+            break
+        key = _compare_key(snippet)
+        if not key or any(key in other or other in key for other in seen):
             continue
-        total = sum(s[0] for s in snippets)
-        per_source.append((total, snippets, src))
-    per_source.sort(key=lambda x: x[0], reverse=True)
+        seen.append(key)
+        picked.append((snippet, src))
 
-    if not per_source or per_source[0][0] < 0.08:
-        noinfo = (
-            "منابع بازیابی‌شده ارتباط کمی با پرسش دارند. ممکن است اطلاعات موردنظر "
-            "در اسناد بارگذاری‌شده وجود نداشته باشد، یا نیاز است سند دقیق‌تری را "
-            "بارگذاری کنید. در زیر بخش‌هایی که بیشترین شباهت را داشته‌اند آمده است:\n\n"
-            if fa
-            else "The retrieved sources have low relevance to your question. "
-                 "Below are the closest passages found:\n\n"
-        )
-        for word in noinfo.split():
+    if note:
+        for word in note.split():
             yield word + " "
+        yield "\n\n"
 
-    per_source = per_source[:4]
+    if not picked:
+        fallback = truncate_words((sources[0].get("content") or "").strip(), 80)
+        picked = [(fallback, sources[0])]
 
-    intro = (
-        f"بر اساس {len(per_source)} منبع مرتبط:\n\n"
-        if fa
-        else f"Based on {len(per_source)} relevant source(s):\n\n"
-    )
-    yield intro
-
-    for i, (_, snippets, src) in enumerate(per_source, start=1):
-        title = src.get("title") or ("منبع" if fa else "Source")
-        header = f"[{i}] {title}"
-        if src.get("page_number"):
-            header += f" (صفحه {src['page_number']})"
-        header += ":\n"
-        for w in header.split():
-            yield w + " "
-        yield "\n"
-        for _, snip in snippets:
-            words = snip.split()
-            if len(words) > 70:
-                snip = " ".join(words[:70]) + "…"
-            for w in (snip + " ").split():
-                yield w + " "
+    for index, (snippet, _src) in enumerate(picked, start=1):
+        for word in f"[{index}] ".split():
+            yield word + " "
+        for word in truncate_words(snippet, 80).split():
+            yield word + " "
         yield "\n"
 
 
@@ -400,66 +387,37 @@ def build_messages(
     question: str,
     context: str,
     language: str = "fa",
-    max_tokens: Optional[int] = None,
+    history_budget_tokens: Optional[int] = None,
 ) -> List[Dict[str, str]]:
-    """Build the LLM message list respecting the model's context budget."""
-    ctx_budget = max_tokens or settings.rag_context_max_tokens
-    if language.startswith("fa"):
-        ctx_instruction = (
-            "پاسخ خود را تنها بر اساس متن «منابع» زیر بنویس و هر ادعا را به شماره "
-            "منبع میان کروشه استناد کن، برای نمونه [۱] یا [۱، ۳]. اگر پاسخ نیاز به "
-            "ترکیب اطلاعات چند منبع دارد، همه منابع مرتبط را با هم ترکیب کن. اگر "
-            "اطلاعات کافی نیست، صریحاً بگو و از حدس زدن بپرهیز."
-        )
-    else:
-        ctx_instruction = (
-            "Answer strictly using the 'Sources' context below and cite each claim "
-            "with source numbers in brackets, e.g. [1] or [1, 3]. When the answer "
-            "requires combining information across multiple sources, synthesize "
-            "them and cite all relevant sources. If the context is insufficient, "
-            "say so explicitly — do not guess."
-        )
+    """Assemble the chat request (system + trimmed history + context + question).
 
-    system_content = system_prompt
-    system_tokens = approximate_tokens(system_content)
-    instr_tokens = approximate_tokens(ctx_instruction)
-    q_tokens = approximate_tokens(question)
-    gen_reserve = settings.llm_max_tokens + 384
-    # Detect actual ctx size from whatever llama-server ended up using.
-    info = None
-    try:
-        info = ensure_llama_server()
-    except Exception:
-        info = None
-    total_ctx = int(info["ctx_size"]) if info else int(settings.llm_context_size)
-
-    available = total_ctx - system_tokens - instr_tokens - q_tokens - gen_reserve
-    history_budget = int(available * 0.20)
-    sources_budget = int(available * 0.80)
-    if sources_budget < 400:
-        sources_budget = 400
-        history_budget = max(0, available - sources_budget)
-
-    trimmed: List[Dict[str, str]] = []
+    The context itself is already trimmed by the caller against the model slot;
+    here only the conversation history is budgeted, so a long chat cannot push
+    the retrieved sources out of the window.
+    """
+    ctx_instruction = (
+        "پاسخ خود را تنها بر اساس متن منابع زیر بنویس و به شماره منبع ([1]، [2] و ...) استناد کن. "
+        "هر مطلب را فقط یک بار بنویس و جمله‌ها را تکرار نکن. "
+        "اگر اطلاعات کافی نیست، صریحاً بگو."
+        if language.startswith("fa")
+        else "Answer strictly using the source context below, cite the source numbers, "
+        "never repeat a sentence, and say so explicitly when the context is insufficient."
+    )
+    user_block = f"{ctx_instruction}\n\nمنابع:\n{context}\n\nپرسش: {question}"
+    budget = history_budget_tokens or settings.rag_history_max_tokens
     acc = 0
-    for msg in reversed(history[-8:]):
-        size = approximate_tokens(msg.get("content", "")) + 4
-        if acc + size > history_budget:
+    trimmed: List[Dict[str, str]] = []
+    for msg in reversed(history[-10:]):
+        size = approximate_tokens(str(msg.get("content", "")))
+        if acc + size > budget:
             break
         trimmed.insert(0, msg)
         acc += size
-
-    ctx_words = context.split()
-    ctx_tok = approximate_tokens(context)
-    if ctx_tok > sources_budget:
-        keep = max(96, int(len(ctx_words) * (sources_budget / max(1, ctx_tok))))
-        context = " ".join(ctx_words[:keep]) + "…"
-
-    user_block = f"{ctx_instruction}\n\nSources / منابع:\n{context}\n\nQuestion / پرسش: {question}"
-    messages = [{"role": "system", "content": system_content}]
-    messages.extend(trimmed)
-    messages.append({"role": "user", "content": user_block})
-    return messages
+    return [
+        {"role": "system", "content": system_prompt},
+        *trimmed,
+        {"role": "user", "content": user_block},
+    ]
 
 
 _service: Optional[LLMSession] = None
@@ -470,3 +428,9 @@ def get_llm_service() -> LLMSession:
     if _service is None:
         _service = LLMSession(settings.llm_server_url, settings.llm_model_name)
     return _service
+
+
+def reset_llm_service() -> None:
+    """Forget the cached availability (used by the admin health page/tests)."""
+    global _service
+    _service = None

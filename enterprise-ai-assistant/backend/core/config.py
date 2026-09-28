@@ -263,11 +263,26 @@ class Config:
 
     @property
     def llm_max_tokens(self) -> int:
-        return int(self.get("llm.max_tokens", 2048))
+        return int(self.get("llm.max_tokens", 1024))
 
     @property
     def llm_context_size(self) -> int:
-        return int(self.get("llm.context_size", 4096))
+        return int(self.get("llm.context_size", 8192))
+
+    @property
+    def llm_parallel(self) -> int:
+        """Number of slots llama-server was started with (``--parallel``)."""
+        return max(1, int(self.get("llm.parallel", 2)))
+
+    @property
+    def llm_reserve_tokens(self) -> int:
+        """Safety margin kept free so the prompt never overflows the slot."""
+        return max(64, int(self.get("llm.reserve_tokens", 320)))
+
+    @property
+    def llm_slot_tokens(self) -> int:
+        """Tokens one request may use (llama-server splits the context)."""
+        return max(512, self.llm_context_size // self.llm_parallel)
 
     # Embedding
     @property
@@ -315,6 +330,19 @@ class Config:
     @property
     def rag_min_confidence(self) -> float:
         return float(self.get("rag.min_confidence", 0.3))
+
+    @property
+    def rag_min_relevance(self) -> float:
+        """Below this a chunk is not offered as a source at all."""
+        return float(self.get("rag.min_relevance", 0.08))
+
+    @property
+    def rag_max_chunks_per_source(self) -> int:
+        return max(1, int(self.get("rag.max_chunks_per_source", 2)))
+
+    @property
+    def rag_duplicate_similarity(self) -> float:
+        return float(self.get("rag.duplicate_similarity", 0.75))
 
     # Storage
     @property

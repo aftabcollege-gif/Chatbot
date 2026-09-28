@@ -168,14 +168,31 @@ export function ChatPage() {
               setMessages((m) => {
                 const copy = [...m];
                 const last = copy[copy.length - 1];
-                if (last) copy[copy.length - 1] = { ...last, error: true, content: ev.message };
+                if (last) {
+                  // Keep whatever the model already produced; only add the note
+                  // (the technical detail stays in the console for support).
+                  const content = last.content?.trim()
+                    ? `${last.content}\n\n${ev.message}`
+                    : ev.message;
+                  copy[copy.length - 1] = { ...last, error: true, streaming: false, content };
+                }
                 return copy;
               });
+              if (ev.details) console.warn("[chat] stream error:", ev.details);
             } else if (ev.type === "done") {
               setMessages((m) => {
                 const copy = [...m];
                 const last = copy[copy.length - 1];
-                if (last) copy[copy.length - 1] = { ...last, streaming: false, id: ev.message_id };
+                if (last) {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    streaming: false,
+                    // The RAG layer sends a `done` without an id; only the final
+                    // event carries the stored message id.
+                    id: ev.message_id || last.id,
+                    sources: ev.sources?.length ? ev.sources : last.sources,
+                  };
+                }
                 return copy;
               });
             }
@@ -186,10 +203,21 @@ export function ChatPage() {
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {
+        console.warn("[chat] request failed:", err);
         setMessages((m) => {
           const copy = [...m];
           const last = copy[copy.length - 1];
-          if (last) copy[copy.length - 1] = { ...last, streaming: false, error: true, content: "خطا در دریافت پاسخ." };
+          const note =
+            "ارتباط با سرور برنامه قطع شد. اگر برنامه را تازه بسته و باز کرده‌اید، " +
+            "چند لحظه صبر کنید و دوباره بپرسید.";
+          if (last) {
+            copy[copy.length - 1] = {
+              ...last,
+              streaming: false,
+              error: true,
+              content: last.content?.trim() ? `${last.content}\n\n${note}` : note,
+            };
+          }
           return copy;
         });
       }

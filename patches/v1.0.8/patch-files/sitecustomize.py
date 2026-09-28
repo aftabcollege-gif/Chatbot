@@ -1,4 +1,4 @@
-"""EnterpriseAI runtime patch loader - v1.0.8 (numpy vector backend).
+"""EnterpriseAI runtime patch loader - v1.0.8-r2 (numpy backend + answer quality).
 
 Key behavior: patches dir is APPENDED to sys.path (not inserted at front),
 then patched modules are pre-loaded directly via spec_from_file_location
@@ -32,11 +32,16 @@ def _sc_log(msg):
 _sc_log("starting; __file__=%s; sys.path[0]=%s; sys.path has _PATCH_DIR=%s"
         % (__file__, sys.path[0] if sys.path else "(none)", _PATCH_DIR in sys.path))
 
+# Order matters: a module must be pre-loaded before anything that imports it.
+# rag_scoring / answer_guard are helpers used by rag_service and reranker_service.
 _PATCHES = [
     ("utils.persian",                os.path.join(_PATCH_DIR,"utils","persian.py")),
     ("core.database",                os.path.join(_PATCH_DIR,"core","database.py")),
     ("services.normalizer_service",  os.path.join(_PATCH_DIR,"services","normalizer_service.py")),
     ("services.embedding_service",   os.path.join(_PATCH_DIR,"services","embedding_service.py")),
+    ("services.rag_scoring",         os.path.join(_PATCH_DIR,"services","rag_scoring.py")),
+    ("services.answer_guard",        os.path.join(_PATCH_DIR,"services","answer_guard.py")),
+    ("services.query_context_service", os.path.join(_PATCH_DIR,"services","query_context_service.py")),
     ("services.reranker_service",    os.path.join(_PATCH_DIR,"services","reranker_service.py")),
     ("services.llm_service",         os.path.join(_PATCH_DIR,"services","llm_service.py")),
     ("services.rag_service",         os.path.join(_PATCH_DIR,"services","rag_service.py")),
@@ -52,6 +57,12 @@ def _load(name,path):
             return False
         m=importlib.util.module_from_spec(spec); sys.modules[name]=m
         spec.loader.exec_module(m)
+        # Expose the module on its parent package too: frozen code often does
+        # ``from services import rag_service`` and that reads the attribute.
+        parent, _, child = name.rpartition(".")
+        if parent and parent in sys.modules:
+            try: setattr(sys.modules[parent], child, m)
+            except Exception: pass
         print("[patch v1.0.8] loaded " + name)
         _sc_log("loaded " + name)
         return True

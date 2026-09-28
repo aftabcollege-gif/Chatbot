@@ -1,27 +1,59 @@
 """Retrieval-Augmented Generation pipeline.
 
 Hybrid retrieval:
-  1. Vector search (sqlite-vec) on document chunks and knowledge items.
-  2. Full-text search (FTS5 / BM25) on the same content.
+  1. Full-text search (FTS5 / BM25) on chunks and knowledge items — queried with
+     the *meaningful* words only (see :func:`utils.persian.content_terms`) and
+     ZWNJ-tolerant spellings.
+  2. Vector search on the same content (sqlite-vec, or the numpy fallback).
   3. Permission / scope filtering.
   4. Reciprocal Rank Fusion (RRF) merge.
-  5. Cross-encoder / lexical rerank.
-  6. Context assembly + streaming answer.
+  5. Evidence scoring: lexical coverage (IDF-weighted) + vector similarity +
+     reranker, so a chunk is only offered as a source when there is real
+     evidence for it — unrelated procedures are no longer cited, and sources
+     that only share a stop-word like «فرآیند» are dropped.
+  6. Context assembly (deduplicated, token-budgeted) + streaming answer with a
+     repetition guard and a graceful extractive fallback.
 """
 from __future__ import annotations
 
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
 from core import database as db
 from core.config import settings
+from services.answer_guard import RepetitionGuard, dedupe_sentences
 from services.embedding_service import get_embedding_service
-from services.query_context_service import standalone_query
+try:  # the patch bundle may run against a build that lacks this module
+    from services.query_context_service import standalone_query
+except ImportError:  # pragma: no cover - legacy frozen builds
+    standalone_query = None  # type: ignore[assignment]
+
+
+async def _resolve_or_keep(question: str, history: List[Dict[str, str]], language: str) -> Dict[str, Any]:
+    """Follow-up resolution, or the untouched question when unavailable."""
+    if standalone_query is None or not history:
+        return {"query": question, "rewritten": False, "method": "none"}
+    return await standalone_query(question, history)
+from services.rag_scoring import (  # noqa: F401 — re-exported for callers/tests
+    combine_evidence,
+    distinctive_terms,
+    inverse_document_frequency,
+    jaccard,
+    lexical_coverage,
+    select_sources,
+)
 from services.reranker_service import get_reranker_service
 from services import llm_service
-from utils.persian import detect_language, normalize_persian, tokenize
+from utils.persian import (
+    approximate_tokens,
+    content_terms,
+    detect_language,
+    fts_query,
+    normalize_persian,
+    tokenize,
+)
 
 
 @dataclass
@@ -40,6 +72,10 @@ class RetrievedChunk:
     organization_id: Optional[str]
     score: float = 0.0
     rank_positions: List[int] = field(default_factory=list)
+    #: Signed-off evidence, all in 0..1 (see :func:`score_candidates`).
+    lexical_score: float = 0.0
+    vector_score: Optional[float] = None
+    rerank_score: float = 0.0
 
     def is_visible_to(self, user: Dict[str, Any]) -> bool:
         if user.get("is_superadmin"):
@@ -57,7 +93,16 @@ class RetrievedChunk:
             return True
         return True
 
+    def body_text(self) -> str:
+        return " ".join(part for part in (self.heading, self.section, self.content) if part)
 
+    def title_text(self) -> str:
+        return " ".join(part for part in (self.title, self.heading, self.section) if part)
+
+
+# --------------------------------------------------------------------------- #
+# SQL helpers
+# --------------------------------------------------------------------------- #
 def _vec_search(
     query_vec: List[float], table: str, id_col: str, k: int, filters: str, params: List[Any]
 ) -> List[Dict[str, Any]]:
@@ -77,9 +122,29 @@ def _vec_search(
         return []
 
 
+def distance_to_similarity(distance: float) -> float:
+    """Convert a vector *distance* into a 0..1 similarity.
+
+    The two backends report different metrics: the numpy fallback returns the
+    cosine distance (``1 - cos``), while native ``vec0`` defaults to L2 — for the
+    unit-norm vectors we store, ``cos = 1 - L2²/2``.
+    """
+    try:
+        d = max(0.0, float(distance))
+    except (TypeError, ValueError):
+        return 0.0
+    if db.vec_backend() == "numpy":
+        similarity = 1.0 - d
+    else:
+        similarity = 1.0 - (d * d) / 2.0
+    return max(0.0, min(1.0, similarity))
+
+
 def _fts_chunks(query: str, k: int, filters: str, params: List[Any]) -> List[Dict[str, Any]]:
     conn = db.get_conn()
-    match_q = " OR ".join(tokenize(query))[:1000] or query
+    match_q = fts_query(query)
+    if not match_q:
+        return []
     # Visibility/ownership/department live on the documents table; chunks carry
     # organization_id for partitioning but inherit the rest from the document.
     sql = f"""
@@ -103,7 +168,9 @@ def _fts_chunks(query: str, k: int, filters: str, params: List[Any]) -> List[Dic
 
 def _fts_knowledge(query: str, k: int, filters: str, params: List[Any]) -> List[Dict[str, Any]]:
     conn = db.get_conn()
-    match_q = " OR ".join(tokenize(query))[:1000] or query
+    match_q = fts_query(query)
+    if not match_q:
+        return []
     sql = f"""
         SELECT ki.id, ki.title, ki.lesson_learned AS content, ki.visibility,
                ki.owner_id, ki.department_id, ki.organization_id,
@@ -193,6 +260,36 @@ def _rrf_merge(*ranked_lists: List[List[Any]], k: int = 60) -> Dict[Any, float]:
     return scores
 
 
+# --------------------------------------------------------------------------- #
+# Evidence scoring / selection
+# --------------------------------------------------------------------------- #
+#: Kept as a thin wrapper so the scoring rules live in exactly one place
+#: (:mod:`services.rag_scoring`) while callers/tests can keep using this name.
+def score_candidates(
+    chunks: List[RetrievedChunk],
+    terms: List[str],
+    *,
+    min_relevance: Optional[float] = None,
+    max_per_source: Optional[int] = None,
+    duplicate_similarity: Optional[float] = None,
+    limit: Optional[int] = None,
+) -> List[RetrievedChunk]:
+    """Score, gate, deduplicate and rank the candidates (see :mod:`rag_scoring`)."""
+    return select_sources(
+        chunks,
+        terms,
+        tokenize,
+        min_relevance=_setting("rag_min_relevance", 0.08) if min_relevance is None else min_relevance,
+        max_per_source=(
+            _setting("rag_max_chunks_per_source", 2) if max_per_source is None else max_per_source
+        ),
+        duplicate_similarity=(
+            _setting("rag_duplicate_similarity", 0.75) if duplicate_similarity is None else duplicate_similarity
+        ),
+        limit=settings.reranker_top_k if limit is None else limit,
+    )
+
+
 async def resolve_query(
     question: str,
     history: Optional[List[Dict[str, str]]] = None,
@@ -200,11 +297,14 @@ async def resolve_query(
 ) -> Dict[str, Any]:
     """Make *question* self-contained using the conversation (never raises)."""
     try:
-        return await standalone_query(question, history, language)
+        return await _resolve_or_keep(question, history or [], language)
     except Exception:
         return {"query": question, "rewritten": False, "method": "none"}
 
 
+# --------------------------------------------------------------------------- #
+# Retrieval
+# --------------------------------------------------------------------------- #
 def retrieve(
     question: str,
     user: Dict[str, Any],
@@ -213,19 +313,22 @@ def retrieve(
     top_k: Optional[int] = None,
 ) -> List[RetrievedChunk]:
     start = time.time()
-    top_k = top_k or settings.rag_retrieval_top_k
+    pool_k = top_k or settings.rag_retrieval_top_k
+    final_k = settings.reranker_top_k
+    terms = content_terms(question) or tokenize(normalize_persian(question))
+
     embedder = get_embedding_service()
     q_vec = embedder.embed_one(normalize_persian(question))
 
     chunk_filter, chunk_params = _scope_clause(scope, scope_id, user)
     know_filter, know_params = _knowledge_scope_clause(scope, scope_id, user)
 
-    candidates: Dict[str, RetrievedChunk] = {}
+    candidates: Dict[Any, RetrievedChunk] = {}
 
     # 1) FTS on chunks.
-    fts_chunks = _fts_chunks(question, top_k, chunk_filter.replace("c.", "c."), chunk_params)
+    fts_chunks = _fts_chunks(question, pool_k, chunk_filter, chunk_params)
     fts_keys: List[Any] = []
-    for i, row in enumerate(fts_chunks):
+    for row in fts_chunks:
         key = ("doc", row["id"])
         fts_keys.append(key)
         if key not in candidates:
@@ -244,18 +347,12 @@ def retrieve(
                 organization_id=row["organization_id"],
             )
 
-    # 2) Vector search on chunks (requires sqlite-vec). We need to filter by
-    #    visibility; vec0 only supports the embedding MATCH plus k, so we fetch
-    #    a larger pool and post-filter.
+    # 2) Vector search on chunks. We need to filter by visibility; vec0 only
+    #    supports the embedding MATCH plus k, so we fetch a larger pool and
+    #    post-filter.
+    vec_keys: List[Any] = []
     if db.vec_available():
-        vec_rows = _vec_search(
-            q_vec,
-            "chunks_vec",
-            "chunk_id",
-            top_k * 3,
-            "",
-            [],
-        )
+        vec_rows = _vec_search(q_vec, "chunks_vec", "chunk_id", pool_k * 3, "", [])
         if vec_rows:
             ids = [v["id"] for v in vec_rows]
             placeholders = ",".join("?" for _ in ids)
@@ -269,10 +366,11 @@ def retrieve(
                     WHERE c.id IN ({placeholders}) AND d.status='READY'""",
                 ids,
             )
-            vec_keys: List[Any] = []
-            for pos, r in enumerate(rows):
-                d = dict(r)
-                # Apply scope/visibility filter in-process.
+            by_id = {dict(r)["id"]: dict(r) for r in rows}
+            for hit in vec_rows:
+                d = by_id.get(hit["id"])
+                if not d:
+                    continue
                 temp = RetrievedChunk(
                     source_type="document",
                     source_id=d["document_id"],
@@ -300,19 +398,20 @@ def retrieve(
                         continue
                 key = ("doc", d["id"])
                 vec_keys.append(key)
+                similarity = distance_to_similarity(hit["distance"])
                 if key not in candidates:
-                    doc = db.query_one(
-                        "SELECT title FROM documents WHERE id=?", (d["document_id"],)
-                    )
-                    temp.title = doc["title"] if doc else "سند"
+                    temp.title = temp.title or "سند"
+                    temp.vector_score = similarity
                     candidates[key] = temp
+                else:
+                    candidates[key].vector_score = max(
+                        candidates[key].vector_score or 0.0, similarity
+                    )
         else:
             vec_keys = []
-    else:
-        vec_keys = []
 
     # 3) Knowledge base FTS.
-    know_rows = _fts_knowledge(question, top_k, know_filter, know_params)
+    know_rows = _fts_knowledge(question, pool_k, know_filter, know_params)
     know_keys: List[Any] = []
     for row in know_rows:
         key = ("know", row["id"])
@@ -334,9 +433,9 @@ def retrieve(
             )
 
     # 4) Vector search knowledge.
+    vk_keys: List[Any] = []
     if db.vec_available():
-        vec_know = _vec_search(q_vec, "knowledge_vec", "knowledge_id", top_k * 2, "", [])
-        vk_keys: List[Any] = []
+        vec_know = _vec_search(q_vec, "knowledge_vec", "knowledge_id", pool_k * 2, "", [])
         if vec_know:
             ids = [v["id"] for v in vec_know]
             placeholders = ",".join("?" for _ in ids)
@@ -346,9 +445,10 @@ def retrieve(
                     FROM knowledge_items WHERE id IN ({placeholders})""",
                 ids,
             )
-            for r in rows:
-                d = dict(r)
-                if d["status"] != "PUBLISHED":
+            by_id = {dict(r)["id"]: dict(r) for r in rows}
+            for hit in vec_know:
+                d = by_id.get(hit["id"])
+                if not d or d["status"] != "PUBLISHED":
                     continue
                 temp = RetrievedChunk(
                     source_type="knowledge",
@@ -368,48 +468,70 @@ def retrieve(
                     continue
                 key = ("know", d["id"])
                 vk_keys.append(key)
+                similarity = distance_to_similarity(hit["distance"])
                 if key not in candidates:
+                    temp.vector_score = similarity
                     candidates[key] = temp
-    else:
-        vk_keys = []
+                else:
+                    candidates[key].vector_score = max(
+                        candidates[key].vector_score or 0.0, similarity
+                    )
 
-    # 5) RRF merge.
+    # 5) RRF merge (kept as the recall ordering) …
     rrf = _rrf_merge(fts_keys, vec_keys, know_keys, vk_keys)
     merged: List[RetrievedChunk] = []
-    for key, score in sorted(rrf.items(), key=lambda x: x[1], reverse=True):
+    for key, _score in sorted(rrf.items(), key=lambda x: x[1], reverse=True):
         chunk = candidates.get(key)
         if chunk is None:
             continue
-        chunk.score = round(score, 5)
         merged.append(chunk)
-        if len(merged) >= max(top_k, settings.rag_retrieval_top_k):
+        if len(merged) >= max(pool_k, settings.rag_retrieval_top_k):
             break
 
-    # 6) Rerank.
+    # 6) … then rerank (absolute 0..1) and score every candidate with the
+    #    evidence it actually carries.
     if merged:
         reranker = get_reranker_service()
-        docs = [f"{c.title}\n{c.content}" for c in merged]
-        reranked = reranker.rerank(question, docs, top_k=settings.reranker_top_k)
-        final = []
-        for idx, score in reranked:
-            merged[idx].score = round(float(score), 4)
-            final.append(merged[idx])
-        merged = final
+        docs = [f"{c.title}\n{c.body_text()}" for c in merged]
+        for index, score in reranker.rerank(question, docs, top_k=len(merged)):
+            merged[index].rerank_score = max(0.0, min(1.0, float(score)))
 
+    result = score_candidates(merged, terms, limit=final_k)
     elapsed = (time.time() - start) * 1000
-    return merged
+    if not result:
+        print(
+            f"[rag] no source passed the evidence gate "
+            f"(terms={terms[:6]}, candidates={len(merged)}, {elapsed:.0f} ms)"
+        )
+    return result
 
 
-def assemble_context(chunks: List[RetrievedChunk]) -> str:
-    lines: List[str] = []
-    for i, c in enumerate(chunks, start=1):
-        title = c.title or "منبع"
-        ref = f"[{i}] ({title}"
-        if c.page_number:
-            ref += f"، صفحه {c.page_number}"
+def assemble_context(chunks: List[RetrievedChunk], max_tokens: Optional[int] = None) -> str:
+    """Numbered, deduplicated and token-budgeted context for the model.
+
+    Sentences that already appeared in an earlier chunk (overlapping chunks
+    repeat them) are not pasted again — otherwise the model restates them.
+    """
+    budget = max_tokens or settings.rag_context_max_tokens
+    parts: List[str] = []
+    used = 0
+    seen: Set[str] = set()
+    for index, chunk in enumerate(chunks, start=1):
+        body = dedupe_sentences(chunk.content, seen)
+        if not body.strip():
+            continue
+        title = chunk.title or "منبع"
+        ref = f"[{index}] ({title}"
+        if chunk.page_number:
+            ref += f"، صفحه {chunk.page_number}"
         ref += ")"
-        lines.append(f"{ref}\n{c.content}")
-    return "\n\n".join(lines)
+        part = f"{ref}\n{body}"
+        cost = approximate_tokens(part)
+        if parts and used + cost > budget:
+            break
+        parts.append(part)
+        used += cost
+    return "\n\n".join(parts)
 
 
 def sources_payload(chunks: List[RetrievedChunk]) -> List[Dict[str, Any]]:
@@ -438,6 +560,68 @@ def average_confidence(chunks: List[RetrievedChunk]) -> float:
     return round(sum(c.score for c in chunks) / len(chunks), 4)
 
 
+def _setting(name: str, default):
+    """Read a config value, tolerating an older ``core.config``.
+
+    Patch builds replace only some modules, so a config key that exists in this
+    tree may be missing from the frozen one — a missing key must degrade to its
+    default, never raise ``AttributeError`` at request time.
+    """
+    value = getattr(settings, name, None)
+    return default if value is None else value
+
+
+def prompt_budget(slot_tokens: Optional[int] = None) -> Tuple[int, int, int]:
+    """``(max_tokens, context_tokens, history_tokens)`` for one chat request.
+
+    Everything is derived from the model slot — the value llama-server reports
+    when it is running, otherwise the configured one — so the request always
+    fits and the server never answers with HTTP 400 (the old «LLM stream
+    error»).
+    """
+    slot = int(slot_tokens or _setting("llm_slot_tokens", 0) or 0)
+    if not slot:
+        context = int(_setting("llm_context_size", 4096))
+        slot = max(512, context // max(1, int(_setting("llm_parallel", 1))))
+    reserve = int(_setting("llm_reserve_tokens", 320))
+    max_tokens = max(256, min(int(_setting("llm_max_tokens", 1024)), slot // 3))
+    history_tokens = max(160, min(settings.rag_history_max_tokens, slot // 5))
+    context_tokens = max(
+        400, min(settings.rag_context_max_tokens, slot - max_tokens - reserve - history_tokens)
+    )
+    return max_tokens, context_tokens, history_tokens
+
+
+def no_information_answer(language: str) -> str:
+    if language.startswith("fa"):
+        return (
+            "اطلاعاتی در منابع مجاز سازمان برای پاسخ به این پرسش پیدا نشد. "
+            "اگر سند مرتبطی وجود دارد، آن را بارگذاری کنید یا پرسش را دقیق‌تر بپرسید."
+        )
+    return (
+        "I could not find information in the allowed sources to answer this question. "
+        "Upload the related document or ask a more specific question."
+    )
+
+
+def search_unavailable_answer(language: str) -> str:
+    """Fallback wording when the index itself cannot be queried."""
+    if language.startswith("fa"):
+        return (
+            "در خواندن منابع سازمان خطایی رخ داد و پاسخ‌یابی در این لحظه ممکن نیست. "
+            "چند لحظه بعد دوباره تلاش کنید؛ اگر تکرار شد صفحه «سلامت سیستم» را بررسی کنید."
+        )
+    return (
+        "The document index could not be read, so answering is unavailable right now. "
+        "Try again shortly; if it repeats, check the System Health page."
+    )
+
+
+async def _stream_text(text: str) -> AsyncIterator[Dict[str, Any]]:
+    for index, word in enumerate(text.split()):
+        yield {"type": "token", "content": word if index == 0 else " " + word}
+
+
 async def answer_stream(
     question: str,
     user: Dict[str, Any],
@@ -445,14 +629,25 @@ async def answer_stream(
     scope: str = "all",
     scope_id: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
-    """Full RAG streaming pipeline. Yields SSE-style event dicts."""
+    """Full RAG streaming pipeline. Yields SSE-style event dicts.
+
+    Failure handling: the answer is never replaced by a technical error. If the
+    model cannot answer (unreachable, prompt rejected, or it crashed mid-stream)
+    the answer degrades to the extractive mode, and the user sees at most a
+    short note.
+    """
     language = detect_language(question)
 
-    # A follow-up ("برای مدیران هم همینطور است؟") carries no subject of its own;
+    # A follow-up («برای مدیران هم همین‌طور است؟») carries no subject of its own;
     # resolve it against the conversation first, then retrieve with the
-    # standalone wording.
-    resolved = await resolve_query(question, history, language)
-    if resolved["rewritten"]:
+    # standalone wording — retrieval and the answer both use it.
+    try:
+        resolved = await resolve_query(question, history, language)
+    except Exception as exc:  # noqa: BLE001 — a broken rewrite must not break the chat
+        print(f"[rag] follow-up resolution failed: {exc!r}")
+        resolved = {"query": question, "rewritten": False, "method": "none"}
+    search_query = resolved["query"] if resolved.get("rewritten") else question
+    if resolved.get("rewritten"):
         yield {
             "type": "query",
             "query": resolved["query"],
@@ -460,45 +655,108 @@ async def answer_stream(
             "original": question,
         }
 
-    chunks = retrieve(
-        resolved["query"], user, scope=scope, scope_id=scope_id
-    )
+    try:
+        chunks = retrieve(search_query, user, scope=scope, scope_id=scope_id)
+    except Exception as exc:  # noqa: BLE001 — never show a raw traceback as the answer
+        print(f"[rag] retrieval failed: {exc!r}")
+        async for event in _stream_text(search_unavailable_answer(language)):
+            yield event
+        yield {"type": "done", "sources": [], "confidence": 0.0, "used_llm": False}
+        return
     sources = sources_payload(chunks)
     yield {"type": "sources", "sources": sources}
 
     confidence = average_confidence(chunks)
     yield {"type": "confidence", "score": confidence}
 
+    if not chunks:
+        # Nothing passed the evidence gate: answer honestly instead of asking the
+        # model to invent something from an empty context.
+        async for event in _stream_text(no_information_answer(language)):
+            yield event
+        yield {"type": "done", "sources": sources, "confidence": 0.0, "used_llm": False}
+        return
+
+    # Probe the model first: the budget below must use the context the server
+    # actually has (it may have been started by an older shell with a smaller
+    # --ctx-size, which is exactly what used to trigger HTTP 400).
+    llm = llm_service.get_llm_service()
+    llm_ready = await llm.is_available()
+
+    max_tokens, context_tokens, history_tokens = prompt_budget(llm.slot_tokens)
     system_prompt = _load_system_prompt(language)
-    context = assemble_context(chunks)
+    context = assemble_context(chunks, context_tokens)
     messages = llm_service.build_messages(
-        system_prompt, history, question, context, language
+        system_prompt, history, question, context, language, history_budget_tokens=history_tokens
     )
 
-    llm = llm_service.get_llm_service()
+    guard = RepetitionGuard()
     used_llm = False
-    if await llm.is_available():
-        try:
-            async for token in llm.stream_chat(messages):
+    partial = False
+
+    if llm_ready:
+        for attempt in (1, 2):
+            try:
+                async for token in llm.stream_chat(messages, max_tokens=max_tokens):
+                    partial = True
+                    safe = guard.push(token)
+                    if safe:
+                        yield {"type": "token", "content": safe}
                 used_llm = True
-                yield {"type": "token", "content": token}
-        except Exception as exc:
-            yield {"type": "error", "message": f"LLM stream error: {exc}"}
-            used_llm = False
+                break
+            except llm_service.ContextOverflowError as exc:
+                # The prompt did not fit after all: halve the context and retry.
+                print(f"[rag] prompt too long ({exc}); retrying with a smaller context")
+                context_tokens = max(300, context_tokens // 2)
+                context = assemble_context(chunks, context_tokens)
+                messages = llm_service.build_messages(
+                    system_prompt,
+                    history,
+                    question,
+                    context,
+                    language,
+                    history_budget_tokens=max(0, history_tokens // 2),
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 — any model failure degrades
+                print(f"[rag] local model failed ({exc.__class__.__name__}: {exc}); using extractive answer")
+                break
+
+    tail = guard.flush()
+    if tail:
+        yield {"type": "token", "content": tail}
 
     if not used_llm:
-        # The extractive generator needs full chunk content (the UI-facing
-        # ``sources`` payload only carries a short snippet).
-        full_sources = [
-            {"content": c.content, "title": c.title, "page_number": c.page_number}
-            for c in chunks
-        ]
-        async for token in llm_service.extractive_stream(
-            question, full_sources, history, language
-        ):
-            yield {"type": "token", "content": token}
+        if partial and guard.emitted_chars > 0:
+            # The model had already produced a usable beginning; keep it and say
+            # that it stopped early instead of silently mixing in another answer.
+            note = (
+                "\n\n(ادامهٔ پاسخ از سمت مدل محلی ناتمام ماند. برای پاسخ کامل، همین پرسش را دوباره بپرسید.)"
+                if language.startswith("fa")
+                else "\n\n(The local model stopped early; ask again for the full answer.)"
+            )
+            yield {"type": "token", "content": note}
+        else:
+            full_sources = [
+                {"content": c.content, "title": c.title, "page_number": c.page_number}
+                for c in chunks
+            ]
+            note = (
+                "پاسخ زیر مستقیماً از منابع استخراج شده است (مدل محلی در دسترس نبود):"
+                if language.startswith("fa")
+                else "The answer below is extracted directly from the sources:"
+            )
+            async for token in llm_service.extractive_stream(
+                search_query, full_sources, history, language, note=note
+            ):
+                yield {"type": "token", "content": token}
 
-    yield {"type": "done", "sources": sources, "confidence": confidence}
+    yield {
+        "type": "done",
+        "sources": sources,
+        "confidence": confidence,
+        "used_llm": used_llm,
+    }
 
 
 def _load_system_prompt(language: str) -> str:
@@ -511,9 +769,11 @@ def _load_system_prompt(language: str) -> str:
     if language.startswith("fa"):
         return (
             "تو دستیار هوشمند سازمانی هستی. پاسخ‌ها را دقیق، کوتاه و بر پایه منابع "
-            "ارائه‌شده بنویس و به شماره منبع استناد کن. اگر منبع کافی نیست، شفاف بگو."
+            "ارائه‌شده بنویس و به شماره منبع استناد کن. هر مطلب را یک بار بنویس و "
+            "جمله‌ها را تکرار نکن. اگر منبع کافی نیست، شفاف بگو."
         )
     return (
         "You are an enterprise assistant. Answer concisely and accurately based "
-        "only on the provided sources and cite source numbers."
+        "only on the provided sources and cite source numbers. Never repeat a "
+        "sentence. Say so when the sources are insufficient."
     )

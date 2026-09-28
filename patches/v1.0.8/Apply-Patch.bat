@@ -54,6 +54,10 @@ if errorlevel 1 (echo [X] sitecustomize.py is NOT v1.0.8 & set "ERR=1") else (ec
 if not exist "%INTERNAL%\patches\core\database.py" (echo [X] patches\core\database.py copy FAILED & set "ERR=1") else (echo [OK] patches\core\database.py)
 findstr "numpy" "%INTERNAL%\patches\core\database.py" >nul
 if errorlevel 1 (echo [X] database.py is NOT numpy version & set "ERR=1") else (echo [OK] database.py contains numpy backend)
+if not exist "%INTERNAL%\patches\services\rag_service.py" (echo [X] patches\services\rag_service.py copy FAILED & set "ERR=1") else (echo [OK] patches\services\rag_service.py)
+if not exist "%INTERNAL%\patches\services\rag_scoring.py" (echo [X] patches\services\rag_scoring.py copy FAILED & set "ERR=1") else (echo [OK] patches\services\rag_scoring.py)
+if not exist "%INTERNAL%\patches\services\answer_guard.py" (echo [X] patches\services\answer_guard.py copy FAILED & set "ERR=1") else (echo [OK] patches\services\answer_guard.py)
+if not exist "%INTERNAL%\patches\utils\persian.py" (echo [X] patches\utils\persian.py copy FAILED & set "ERR=1") else (echo [OK] patches\utils\persian.py)
 if "%ERR%"=="1" (
   echo.
   echo [X] Patch copy verification failed. Try running this bat as administrator.

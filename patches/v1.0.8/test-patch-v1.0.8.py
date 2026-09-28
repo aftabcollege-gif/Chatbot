@@ -39,7 +39,39 @@ def main():
     if not db.vec_available():
         p("[FAIL] vec_available returned False (numpy backend not active)")
         return 5
-    # 3) Check appdata marker/log if possible
+    # 3) Answer-quality modules (v1.0.8-r2)
+    try:
+        import services.rag_service as rag
+        loc = getattr(rag, "__file__", "?")
+        p("[OK] services.rag_service: " + loc)
+        if "patches" not in loc.replace("\\", "/"):
+            p("[!!] rag_service is the FROZEN version, not the patch!")
+            return 6
+        import utils.persian as pe
+        p("[OK] utils.persian: " + str(getattr(pe, "__file__", "?")))
+        match = pe.fts_query("می شود")
+        p("     ZWNJ query for 'می شود' = " + match)
+        if "میشود" not in match:
+            p("[!!] ZWNJ spelling variants are missing")
+            return 7
+        budget = rag.prompt_budget()
+        p("     prompt budget (max_tokens, context, history) = " + str(budget))
+        if not (256 <= budget[0] <= 2048 and budget[1] > 0 and budget[2] > 0):
+            p("[!!] prompt budget looks wrong: " + str(budget))
+            return 8
+        try:
+            import services.rag_scoring as rs, services.answer_guard as ag
+            p("[OK] services.rag_scoring / answer_guard: "
+              + str(getattr(rs, "__file__", "?")))
+            p("     duplicate_similarity gate, repetition guard available")
+        except Exception as e:
+            p("[!!] answer-quality helpers missing: " + repr(e))
+            return 9
+    except Exception as e:
+        p("[FAIL] answer-quality modules: " + repr(e))
+        traceback.print_exc()
+        return 10
+    # 4) Check appdata marker/log if possible
     ad = os.environ.get("APPDATA")
     if ad:
         marker = os.path.join(ad, "EnterpriseAI", "patch-v1.0.8-applied.txt")

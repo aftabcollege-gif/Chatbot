@@ -15,43 +15,42 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from core.config import settings
-from utils.persian import tokenize
+from services.rag_scoring import inverse_document_frequency
+from utils.persian import content_terms, tokenize
 
 
 class _LexicalReranker:
     def rerank(
         self, query: str, documents: List[str], top_k: int
     ) -> List[Tuple[int, float]]:
-        q_tokens = tokenize(query)
-        if not q_tokens:
+        """Score every document with an *absolute* IDF-weighted coverage.
+
+        The score is the share of the query's informative words that the
+        document actually contains (0..1) — deliberately **not** normalised
+        against the best candidate. Dividing by the batch maximum used to make
+        the first result score 1.0 even when it shared nothing but a stop-word
+        with the question, which also inflated the confidence shown in the UI.
+        """
+        q_terms = content_terms(query) or tokenize(query)
+        if not q_terms:
             return [(i, 0.0) for i in range(len(documents))][:top_k]
+        tokenized = [set(tokenize(d)) for d in documents]
+        idf = inverse_document_frequency(tokenized)
+        covered_idf = sum(idf.get(term, 1.0) for term in dict.fromkeys(q_terms))
         scores: List[float] = []
-        # IDF over the provided candidate set.
-        df: dict[str, int] = {}
-        tokenized = [tokenize(d) for d in documents]
-        for toks in tokenized:
-            for term in set(toks):
-                df[term] = df.get(term, 0) + 1
-        N = max(1, len(documents))
-        for toks in tokenized:
-            if not toks:
+        for tokens in tokenized:
+            if not tokens:
                 scores.append(0.0)
                 continue
-            tf: dict[str, int] = {}
-            for t in toks:
-                tf[t] = tf.get(t, 0) + 1
-            score = 0.0
-            for qt in q_tokens:
-                if qt in tf:
-                    idf = math.log(1 + N / (df.get(qt, 0) + 1))
-                    score += (1 + math.log(tf[qt])) * idf
-            # Normalize by document length to avoid bias toward long chunks.
-            scores.append(score / math.sqrt(len(toks)))
+            hit_idf = sum(
+                idf.get(term, 1.0) for term in dict.fromkeys(q_terms) if term in tokens
+            )
+            coverage = hit_idf / covered_idf if covered_idf else 0.0
+            # Slightly favour chunks that are long enough to be informative.
+            length_factor = 0.9 + 0.1 * min(1.0, len(tokens) / 60)
+            scores.append(round(min(1.0, coverage * length_factor), 4))
         ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-        if not ranked:
-            return ranked
-        max_score = ranked[0][1] or 1.0
-        return [(idx, round(score / max_score, 4)) for idx, score in ranked[:top_k]]
+        return ranked[:top_k]
 
 
 class _OnnxReranker:
@@ -91,20 +90,11 @@ class RerankerService:
     def __init__(self) -> None:
         self.backend = "lexical"
         self._impl = _LexicalReranker()
-        # Search bundled path first, then AppData (so users can upgrade the
-        # reranker without touching Program Files).
-        candidates = [settings.reranker_path,
-                      settings.appdata / "models" / "reranker"]
-        chosen = None
-        for d in candidates:
-            if (d / "model.onnx").exists() and (d / "tokenizer.json").exists():
-                chosen = d
-                break
-        if chosen is not None:
+        model_dir = settings.reranker_path
+        if (model_dir / "model.onnx").exists() and (model_dir / "tokenizer.json").exists():
             try:
-                self._impl = _OnnxReranker(chosen)
+                self._impl = _OnnxReranker(model_dir)
                 self.backend = "onnx"
-                print(f"[reranker] ONNX backend: {chosen}")
             except Exception as exc:  # pragma: no cover
                 print(f"[reranker] ONNX unavailable, using lexical: {exc}")
 
