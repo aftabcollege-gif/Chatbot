@@ -158,17 +158,42 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertGreater(kept[0].score, 0.0)
         self.assertLessEqual(kept[0].score, 1.0)
 
+    def test_synonym_question_still_finds_the_document(self):
+        # «pm» is nowhere in the corpus (the documents say «مدیریت پروژه»), so a
+        # strict gate would answer "nothing found" — the relaxed pass must fall
+        # back to the best lexical match instead.
+        kept = self._select(
+            [FakeChunk(self.IRRELEVANT, source_id="leave"), FakeChunk(self.PREVIOUS, source_id="pm-doc")],
+            question="فرآیند mba را مختصر توضیح بده",
+        )
+        self.assertTrue(kept, "a synonym/typo must not produce an empty answer")
+        self.assertIn("pm-doc", [c.source_id for c in kept])
+
     def test_distinctive_terms_pick_the_rare_word(self):
-        chunks = [FakeChunk(self.PREVIOUS), FakeChunk(self.IRRELEVANT)]
+        # «pm» appears in one of two candidates (rare => required); «فرآیند»
+        # appears in both (cannot discriminate => not required).
+        chunks = [FakeChunk(self.PREVIOUS, source_id="pm"), FakeChunk(self.IRRELEVANT, source_id="leave")]
         terms = content_terms("فرآیند PM را مختصر توضیح بده")
         kept = self._select(chunks)
-        idf = {}
-        for chunk in chunks:
-            for token in set(tokenize(chunk.body_text())):
-                idf[token] = idf.get(token, 0) + 1
-        required = distinctive_terms(terms, {k: 1.0 / v for k, v in idf.items()})
-        self.assertIn("pm", required)
-        self.assertEqual(len(kept), 1)
+        from services.rag_scoring import document_frequency, inverse_document_frequency
+
+        tokenized = [set(tokenize(c.body_text())) for c in chunks]
+        required = distinctive_terms(
+            terms, inverse_document_frequency(tokenized), document_frequency(tokenized), len(chunks)
+        )
+        self.assertEqual(required, ["pm"])
+        self.assertEqual([c.source_id for c in kept], ["pm"])
+
+    def test_every_candidate_sharing_a_common_word_is_not_filtered_out(self):
+        # A question made only of a common word («فرآیند») has no distinctive
+        # term at all: the relaxed pass must return the best matches instead of
+        # answering "nothing found".
+        chunks = [
+            FakeChunk(self.PREVIOUS, source_id="a"),
+            FakeChunk(self.IRRELEVANT, source_id="b"),
+        ]
+        kept = self._select(chunks, question="فرآیند را توضیح بده")
+        self.assertEqual(sorted(c.source_id for c in kept), ["a", "b"])
 
 
 class RepetitionGuardTests(unittest.TestCase):

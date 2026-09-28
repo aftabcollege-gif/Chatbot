@@ -90,6 +90,12 @@ async def lifespan(app: FastAPI):
         f"[startup] vector backend: {db.vec_backend()} "
         f"(sqlite-vec path: {db.vec_loaded_path() or '-'})"
     )
+    try:
+        from services.rag_service import PIPELINE_VERSION
+
+        print(f"[startup] answer pipeline: {PIPELINE_VERSION}")
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        print(f"[startup] answer pipeline: unknown ({exc!r})")
     yield
 
 

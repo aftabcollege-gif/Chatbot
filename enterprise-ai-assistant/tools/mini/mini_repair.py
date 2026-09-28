@@ -35,11 +35,15 @@ from typing import Any, Dict, List, Optional, Tuple
 APP_TITLES = ("Chatbot Enterprise", "EnterpriseAI", "دستیار هوشمند سازمانی")
 BACKEND_EXE_NAMES = ("backend-server.exe", "backend-server")
 DLL_NAMES = ("sqlite_vec.dll", "vec0.dll")
+# Default port of the installed application (config: app.port).
+DEFAULT_APP_PORT = 8741
 
 
 # --------------------------------------------------------------------------- #
 # Detection
 # --------------------------------------------------------------------------- #
+
+
 def _candidate_roots() -> List[Path]:
     roots: List[Path] = []
     explicit = os.environ.get("EAI_INSTALL_DIR")
@@ -380,22 +384,29 @@ def repair_installation(install: Path, log=print) -> Dict[str, object]:
     # and ``models/reranker`` relative to its own directory, while the
     # installer keeps the (huge) model files in ``<install>/models``.  Junction
     # the individual model folders instead of copying gigabytes around.
-    models_src = install / "models"
-    if models_src.is_dir():
-        linked = []
-        for model_name in ("embedding", "reranker", "llm", "ocr"):
-            src = models_src / model_name
-            if not src.is_dir() or not any(src.iterdir()):
-                continue
-            target = backend / "models" / model_name
-            # Never copy model folders (hundreds of megabytes); junction only.
-            result = _link_or_copy_dir(src, target, allow_copy=False)
-            if result != "failed":
-                linked.append(f"{model_name} ({result})")
-        if linked:
-            report["actions"].append(("ok", "مدل‌های هوش مصنوعی متصل شدند: " + "، ".join(linked)))
-        else:
-            report["actions"].append(("warn", "مدل‌های هوش مصنوعی یافت نشد؛ جست‌وجو با موتور کلمات کلیدی انجام می‌شود"))
+    linked = []
+    for model_name in ("embedding", "reranker", "llm", "ocr"):
+        src = None
+        for root in _model_roots(install):
+            candidate = root / model_name
+            if candidate.is_dir() and any(candidate.iterdir()):
+                src = candidate
+                break
+        if src is None:
+            continue
+        target = backend / "models" / model_name
+        # Never copy model folders (hundreds of megabytes); junction only.
+        result = _link_or_copy_dir(src, target, allow_copy=False)
+        if result != "failed":
+            linked.append(f"{model_name} ({result})")
+    if linked:
+        report["actions"].append(("ok", "مدل‌های هوش مصنوعی متصل شدند: " + "، ".join(linked)))
+    else:
+        report["actions"].append((
+            "warn",
+            "مدل‌های هوش مصنوعی یافت نشد؛ جست‌وجو با موتور کلمات کلیدی انجام می‌شود "
+            f"(مسیرهای بررسی‌شده: {'، '.join(str(r) for r in _model_roots(install))})",
+        ))
 
     return report
 
@@ -537,7 +548,16 @@ def diagnose_installed_backend(install: Path, log=print) -> Dict[str, Any]:
     the UI (or does not answer at all).  Running it here — with the repaired
     environment — tells us which of the two it is, without guessing.
     """
-    report: Dict[str, Any] = {"ran": False, "serves_ui": False, "status": None, "detail": ""}
+    report: Dict[str, Any] = {
+        "ran": False,
+        "serves_ui": False,
+        "status": None,
+        "detail": "",
+        "health_ok": False,
+        "exited": None,
+        "port_ignored": False,
+        "log_tail": [],
+    }
     backend = backend_dir(install)
     if backend is None:
         report["detail"] = "backend-server.exe یافت نشد"
@@ -577,24 +597,44 @@ def diagnose_installed_backend(install: Path, log=print) -> Dict[str, Any]:
         report["detail"] = f"اجرای بک‌اند نصب‌شده ناموفق بود: {exc!r}"
         return report
 
+    def _health(where: int) -> bool:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{where}/api/health", timeout=2) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
     try:
         deadline = time.time() + 45
         while time.time() < deadline:
-            try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2) as resp:
-                    if resp.status == 200:
-                        break
-            except Exception:
-                time.sleep(1)
-        report["ran"] = True
+            if _health(port):
+                report["health_ok"] = True
+                break
+            if process.poll() is not None:
+                report["exited"] = process.returncode
+                break
+            time.sleep(1)
+        report["ran"] = process.poll() is None or report["health_ok"]
+        # An older frozen backend may ignore APP_PORT and bind its default port;
+        # probe it as well instead of reporting "does not serve the UI".
+        if not report["health_ok"] and _health(DEFAULT_APP_PORT):
+            report["health_ok"] = True
+            report["port_ignored"] = True
+        probe_port = DEFAULT_APP_PORT if report["port_ignored"] else port
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
+            with urllib.request.urlopen(f"http://127.0.0.1:{probe_port}/", timeout=5) as resp:
                 body = resp.read(4000).decode("utf-8", "replace")
                 report["status"] = resp.status
                 report["serves_ui"] = "<html" in body.lower()
                 report["detail"] = "UI" if report["serves_ui"] else body.strip()[:200]
         except Exception as exc:
             report["detail"] = f"پاسخی از بک‌اند نصب‌شده دریافت نشد: {exc!r}"
+        try:
+            if log_file.is_file():
+                lines = [line.rstrip() for line in log_file.read_text("utf-8", "replace").splitlines()]
+                report["log_tail"] = [line for line in lines if line.strip()][-12:]
+        except OSError:
+            pass
     finally:
         try:
             process.terminate()
@@ -605,12 +645,48 @@ def diagnose_installed_backend(install: Path, log=print) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    if report["serves_ui"]:
+    if report["serves_ui"] and not report["port_ignored"]:
         log("    [✓] بک‌اند نسخهٔ نصب‌شده با تنظیمات تعمیرشده، رابط کاربری را سرو می‌کند")
+    elif report["serves_ui"] and report["port_ignored"]:
+        log(
+            f"    [i] بک‌اند نسخهٔ نصب‌شده رابط کاربری را سرو می‌کند، ولی متغیر پورت را "
+            f"نمی‌شناسد و روی پورت پیش‌فرض {DEFAULT_APP_PORT} بالا آمد. این پنجره خودش "
+            "برنامه را روی همان پورت اجرا می‌کند؛ فقط یک نسخه از برنامه را باز نگه دارید."
+        )
+    elif report["exited"] is not None:
+        log(f"    [!] بک‌اند نسخهٔ نصب‌شده بلافاصله بسته شد (کد خروج {report['exited']}).")
+        log("        این پنجره مستقل کار می‌کند؛ نیازی به رفع این مورد برای چت نیست.")
+        log(f"        گزارش کامل: {log_file}")
     else:
         log(f"    [!] بک‌اند نسخهٔ نصب‌شده رابط کاربری را سرو نمی‌کند: {report['detail']}")
         log(f"        گزارش کامل: {log_file}")
+    for line in report["log_tail"][-6:]:
+        log(f"        | {line}")
     return report
+
+
+def _model_roots(install: Path) -> list:
+    """Every place the AI models may live for *install*.
+
+    The installer keeps them in ``<install>/models``, the Electron/Tauri bundles
+    in ``resources/models`` or ``backend/models``, and a user may also have them
+    in the per-user data folder — the launcher must look in all of them before
+    reporting "models not found" (that warning is what sends a working
+    installation into keyword-only search).
+    """
+    roots = [
+        install / "models",
+        install / "resources" / "models",
+        install / "backend" / "models",
+        install / "resources" / "backend" / "models",
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        roots.append(Path(appdata) / "EnterpriseAI" / "models")
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        roots.append(Path(localappdata) / "EnterpriseAI" / "models")
+    return [root for root in roots if root.is_dir()]
 
 
 def _spare_port(start: int = 8790) -> int:

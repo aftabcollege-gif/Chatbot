@@ -560,6 +560,11 @@ def average_confidence(chunks: List[RetrievedChunk]) -> float:
     return round(sum(c.score for c in chunks) / len(chunks), 4)
 
 
+# Printed at startup (see ``backend/main.py``) so a log — or the mini launcher's
+# report for the *installed* app — tells which answer pipeline is really running.
+PIPELINE_VERSION = "v1.0.8-r2 (ZWNJ-aware FTS, evidence gate, repetition guard)"
+
+
 def _setting(name: str, default):
     """Read a config value, tolerating an older ``core.config``.
 
