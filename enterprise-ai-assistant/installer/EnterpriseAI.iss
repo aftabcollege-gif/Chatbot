@@ -31,8 +31,18 @@ SetupIconFile=assets\icon.ico
 ShowLanguageDialog=yes
 
 [Languages]
-Name: "persian"; MessagesFile: "compiler:Languages\Persian.isl"
+; Inno Setup does not ship Persian.isl with every release, so the Persian entry
+; is only added when a translation is actually available (a copy committed under
+; installer/languages/ or one that ships with the installed compiler).  Without
+; it, ISCC aborts with "Can't open language file ... Persian.isl".
 Name: "english"; MessagesFile: "compiler:Default.isl"
+#if FileExists(AddBackslash(SourcePath) + "languages\Persian.isl")
+Name: "persian"; MessagesFile: "languages\Persian.isl"
+#elif FileExists("C:\Program Files (x86)\Inno Setup 6\Languages\Persian.isl")
+Name: "persian"; MessagesFile: "compiler:Languages\Persian.isl"
+#elif FileExists("C:\Program Files\Inno Setup 6\Languages\Persian.isl")
+Name: "persian"; MessagesFile: "C:\Program Files\Inno Setup 6\Languages\Persian.isl"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "ایجاد آیکون روی دسکتاپ"; GroupDescription: "آیکون‌ها:"; Flags: unchecked
@@ -61,6 +71,10 @@ Source: "..\models\ocr\*"; DestDir: "{app}\models\ocr"; Flags: ignoreversion rec
 
 ; --- Frontend is served by the backend (already bundled into PyInstaller one-dir) ---
 Source: "..\frontend\dist\*"; DestDir: "{app}\frontend\dist"; Flags: ignoreversion recursesubdirs
+; Belt and braces: older backends resolved frontend/dist relative to the backend
+; executable, so stage a copy there too (a few hundred KB) — this is what made
+; the packaged app show a blank white window.
+Source: "..\frontend\dist\*"; DestDir: "{app}\backend\frontend\dist"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
 ; --- Config ---
 Source: "..\config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs
@@ -90,20 +104,10 @@ Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{userappdata}\EnterpriseAI"; Check: ShouldDeleteData
 
 [Code]
+// The [Code] section is Delphi/Pascal: comments use // (a leading ';' is a
+// syntax error here, unlike the rest of the .iss file).  Only constructs that
+// ISCC 6 accepts unconditionally are used.
 function ShouldDeleteData: Boolean;
 begin
   Result := MsgBox('آیا داده‌های کاربر (پایگاه داده و اسناد) هم حذف شوند؟', mbConfirmation, MB_YESNO) = IDYES;
-end;
-
-function InitializeSetup(): Boolean;
-var
-  RamMB: Cardinal;
-begin
-  Result := True;
-  // Basic RAM warning (does not block).
-  RamMB := 0;
-  if GetPhysicallyInstalledSystemMemory(RamMB) then begin
-    if RamMB < 7*1024*1024 then
-      MsgBox('هشدار: حداقل ۸ گیگابایت رم پیشنهاد می‌شود.', mbWarning, MB_OK);
-  end;
 end;

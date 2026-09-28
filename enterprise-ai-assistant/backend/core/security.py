@@ -5,28 +5,98 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError, InvalidHashError
 from jose import JWTError, jwt
 
 from .config import settings
 
 _ALGORITHM = "HS256"
-_ph = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
+
+# --- Password hashing -------------------------------------------------------
+# Argon2id is the primary algorithm.  Some frozen/offline environments ship
+# without the argon2 CFFI binding; instead of refusing to start (or, worse,
+# creating an account nobody can log into) we fall back to PBKDF2-HMAC-SHA256
+# from the standard library.  Both formats are always *verifiable*, so
+# databases written by one build can be opened by the other.
+_PBKDF2_PREFIX = "$pbkdf2-sha256$"
+_PBKDF2_ROUNDS = 260000
+
+try:  # pragma: no cover - depends on the runtime environment
+    from argon2 import PasswordHasher
+    from argon2.exceptions import InvalidHashError, VerifyMismatchError
+
+    _ph = PasswordHasher(time_cost=2, memory_cost=65536, parallelism=2)
+    _ARGON2 = True
+except Exception:  # pragma: no cover
+    _ph = None
+    _ARGON2 = False
+
+    class InvalidHashError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class VerifyMismatchError(Exception):  # type: ignore[no-redef]
+        pass
+
+
+def argon2_available() -> bool:
+    return _ARGON2
+
+
+def _pbkdf2_hash(password: str, rounds: int = _PBKDF2_ROUNDS) -> str:
+    import base64
+    import hashlib
+    import os as _os
+
+    salt = _os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
+    return "{}{}${}${}".format(
+        _PBKDF2_PREFIX,
+        rounds,
+        base64.b64encode(salt).decode("ascii"),
+        base64.b64encode(digest).decode("ascii"),
+    )
+
+
+def _pbkdf2_verify(password: str, password_hash: str) -> bool:
+    import base64
+    import hashlib
+    import hmac
+
+    try:
+        _, rounds, salt_b64, digest_b64 = password_hash.split("$", 3)
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(digest_b64)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(rounds))
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
 
 
 def hash_password(password: str) -> str:
-    return _ph.hash(password)
+    if _ph is not None:
+        return _ph.hash(password)
+    return _pbkdf2_hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    if not password_hash:
+        return False
+    if password_hash.startswith(_PBKDF2_PREFIX):
+        return _pbkdf2_verify(password, password_hash)
+    if _ph is None:
+        return False
     try:
         return _ph.verify(password_hash, password)
     except (VerifyMismatchError, InvalidHashError, ValueError):
         return False
+    except Exception:
+        return False
 
 
 def needs_rehash(password_hash: str) -> bool:
+    if password_hash.startswith(_PBKDF2_PREFIX):
+        return _ARGON2  # upgrade to argon2 as soon as the binding is available
+    if _ph is None:
+        return False
     try:
         return _ph.check_needs_rehash(password_hash)
     except InvalidHashError:
@@ -83,6 +153,7 @@ class AuthError(Exception):
 
 
 __all__ = [
+    "argon2_available",
     "hash_password",
     "verify_password",
     "needs_rehash",

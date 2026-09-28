@@ -1,0 +1,77 @@
+app:
+  name: "دستیار هوشمند سازمانی"
+  version: "1.0.8"
+  language: "fa"
+  theme: "dark"
+  port: 8741
+  host: "127.0.0.1"
+
+llm:
+  provider: "llamacpp"
+  server_host: "127.0.0.1"
+  server_port: 8742
+  # Backend auto-selects the strongest *.gguf present in models/llm (or
+  # %APPDATA%/EnterpriseAI/models/llm). 7B Instruct Q4 is recommended for
+  # 16GB systems; the default fallback filename here is only used when the
+  # live probe fails.
+  model_name: "qwen2.5-7b-instruct"
+  model_path: "models/llm/qwen2.5-7b-instruct-q4_k_m.gguf"
+  context_size: 8192
+  temperature: 0.1
+  max_tokens: 1024
+  threads: 0
+  gpu_layers: 0
+
+embedding:
+  model_path: "models/embedding"
+  dimension: 1024
+  batch_size: 16
+
+reranker:
+  model_path: "models/reranker"
+  top_k: 12
+
+rag:
+  chunk_size: 320
+  chunk_overlap: 120
+  retrieval_top_k: 50
+  reranker_top_k: 12
+  context_max_tokens: 3000
+  chat_history_max_tokens: 400
+  min_confidence: 0.10
+
+ocr:
+  provider: "tesseract"
+  languages: ["fa", "en"]
+
+auth:
+  jwt_secret: "CHANGE_THIS_ON_FIRST_RUN"
+  jwt_refresh_secret: "CHANGE_THIS_ON_FIRST_RUN"
+  jwt_expiry_minutes: 60
+  jwt_refresh_days: 7
+  max_login_attempts: 5
+  lockout_minutes: 15
+
+storage:
+  max_file_size_mb: 100
+  allowed_types:
+    - pdf
+    - docx
+    - xlsx
+    - pptx
+    - txt
+    - md
+    - csv
+    - html
+    - json
+    - xml
+    - odt
+    - epub
+
+database:
+  path: ""
+
+backup:
+  enabled: true
+  max_backups: 10
+  auto_backup_on_startup: true

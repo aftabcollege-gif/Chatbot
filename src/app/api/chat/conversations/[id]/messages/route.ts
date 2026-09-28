@@ -94,6 +94,20 @@ export async function POST(
 
   const { content } = parsed.data;
 
+  // The conversation so far. A follow-up question ("برای مدیران هم همین‌طور
+  // است؟") has no subject of its own, so the relation between it and the
+  // previous turns is resolved *before* retrieval (lib/rag/query-context.ts).
+  const previousMessages = await db
+    .select({ role: messages.role, content: messages.content })
+    .from(messages)
+    .where(eq(messages.conversationId, id))
+    .orderBy(asc(messages.createdAt));
+
+  const history = previousMessages.slice(-12).map((m) => ({
+    role: m.role === "assistant" ? ("assistant" as const) : ("user" as const),
+    content: m.content,
+  }));
+
   // Save user message
   const [userMessage] = await db
     .insert(messages)
@@ -124,12 +138,13 @@ export async function POST(
       .where(eq(conversations.id, id));
   }
 
-  // RAG pipeline
+  // RAG pipeline (history-aware: a follow-up is resolved against the dialog)
   const ragResult = await answerWithRag(
     content,
     user.organizationId,
     user.departmentId,
-    user.id
+    user.id,
+    history
   );
 
   // Save assistant message
@@ -185,6 +200,9 @@ export async function POST(
     assistantMessage,
     sources: ragResult.sources,
     confidence: ragResult.confidence,
+    // Present only when the question was resolved against the conversation.
+    resolvedQuery: ragResult.resolvedQuery,
+    queryMethod: ragResult.queryMethod,
     ragTrace: hasPermission(user, PERMISSIONS.CHAT_VIEW_TRACE) ? ragResult.ragTrace : undefined,
   });
 }

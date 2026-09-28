@@ -153,18 +153,46 @@ export function ChatPage() {
                 }
                 return copy;
               });
+            } else if (ev.type === "query") {
+              // The assistant resolved this follow-up against the previous
+              // messages before searching the knowledge base.
+              setMessages((m) => {
+                const copy = [...m];
+                const last = copy[copy.length - 1];
+                if (last && last.role === "assistant") {
+                  copy[copy.length - 1] = { ...last, resolved_query: ev.query, resolved_method: ev.method };
+                }
+                return copy;
+              });
             } else if (ev.type === "error") {
               setMessages((m) => {
                 const copy = [...m];
                 const last = copy[copy.length - 1];
-                if (last) copy[copy.length - 1] = { ...last, error: true, content: ev.message };
+                if (last) {
+                  // Keep whatever the model already produced; only add the note
+                  // (the technical detail stays in the console for support).
+                  const content = last.content?.trim()
+                    ? `${last.content}\n\n${ev.message}`
+                    : ev.message;
+                  copy[copy.length - 1] = { ...last, error: true, streaming: false, content };
+                }
                 return copy;
               });
+              if (ev.details) console.warn("[chat] stream error:", ev.details);
             } else if (ev.type === "done") {
               setMessages((m) => {
                 const copy = [...m];
                 const last = copy[copy.length - 1];
-                if (last) copy[copy.length - 1] = { ...last, streaming: false, id: ev.message_id };
+                if (last) {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    streaming: false,
+                    // The RAG layer sends a `done` without an id; only the final
+                    // event carries the stored message id.
+                    id: ev.message_id || last.id,
+                    sources: ev.sources?.length ? ev.sources : last.sources,
+                  };
+                }
                 return copy;
               });
             }
@@ -175,10 +203,21 @@ export function ChatPage() {
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {
+        console.warn("[chat] request failed:", err);
         setMessages((m) => {
           const copy = [...m];
           const last = copy[copy.length - 1];
-          if (last) copy[copy.length - 1] = { ...last, streaming: false, error: true, content: "خطا در دریافت پاسخ." };
+          const note =
+            "ارتباط با سرور برنامه قطع شد. اگر برنامه را تازه بسته و باز کرده‌اید، " +
+            "چند لحظه صبر کنید و دوباره بپرسید.";
+          if (last) {
+            copy[copy.length - 1] = {
+              ...last,
+              streaming: false,
+              error: true,
+              content: last.content?.trim() ? `${last.content}\n\n${note}` : note,
+            };
+          }
           return copy;
         });
       }
@@ -328,6 +367,14 @@ function MessageBubble({ message }: { message: Message }) {
         >
           {message.content || (message.streaming ? <span className="typing-cursor" /> : "")}
         </div>
+        {!isUser && message.resolved_query && (
+          <div className="mt-2 text-[11px] text-muted-foreground flex items-start gap-1">
+            <Sparkles className="h-3 w-3 mt-0.5 shrink-0" />
+            <span>
+              پرسش با توجه به گفت‌وگو تکمیل شد: <span className="font-medium">{message.resolved_query}</span>
+            </span>
+          </div>
+        )}
         {!isUser && message.sources && message.sources.length > 0 && (
           <SourcesPanel sources={message.sources} />
         )}

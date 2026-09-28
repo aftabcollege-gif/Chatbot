@@ -166,6 +166,7 @@ async def send_message(
         full_content = []
         sources = []
         confidence = 0.0
+        answer_so_far = ""  # what has already been streamed (for graceful errors)
         try:
             async for event in rag_service.answer_stream(
                 content,
@@ -176,13 +177,35 @@ async def send_message(
             ):
                 if event["type"] == "token":
                     full_content.append(event["content"])
+                    answer_so_far = "".join(full_content)
                 elif event["type"] == "sources":
                     sources = event["sources"]
                 elif event["type"] == "confidence":
                     confidence = event["score"]
-                await queue.put(event)
+                if event["type"] != "error":
+                    await queue.put(event)
         except Exception as exc:  # noqa: BLE001
-            await queue.put({"type": "error", "message": str(exc)})
+            # The chat must stay usable: log the technical cause, stream a
+            # friendly line, and still save the exchange. Raw exception text
+            # («LLM stream error: ...») is never shown as the answer.
+            print(f"[chat] answer pipeline failed: {exc!r}")
+            fallback = (
+                "در پردازش این پرسش خطایی رخ داد. لطفاً دوباره تلاش کنید؛ "
+                "اگر تکرار شد، سرویس مدل محلی را از صفحه «سلامت سیستم» بررسی کنید."
+            )
+            note_tokens = [word + " " for word in fallback.split()]
+            tokens = ["\n\n", *note_tokens] if answer_so_far else note_tokens
+            for token_text in tokens:
+                full_content.append(token_text)
+                await queue.put({"type": "token", "content": token_text})
+            await queue.put(
+                {
+                    "type": "error",
+                    "message": fallback,
+                    "details": str(exc)[:300],
+                    "partial": bool(answer_so_far),
+                }
+            )
         finally:
             # Persist assistant message + sources.
             answer = "".join(full_content).strip()
@@ -220,7 +243,12 @@ async def send_message(
                 "UPDATE conversations SET updated_at=datetime('now') WHERE id=?",
                 (conv_id,),
             )
-            await queue.put({"type": "done", "message_id": mid})
+            # Final event: it carries the stored message id (used by the UI for
+            # feedback) and tells the client the stream is complete.
+            await queue.put(
+                {"type": "done", "message_id": mid, "final": True,
+                 "confidence": confidence, "sources": sources}
+            )
 
     async def event_stream():
         task = asyncio.create_task(producer())
@@ -228,7 +256,12 @@ async def send_message(
             while True:
                 event = await queue.get()
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event.get("type") in ("done", "error"):
+                if event.get("type") == "error":
+                    break
+                # Only the final (router) done event ends the stream: the RAG
+                # layer sends its own `done` with the sources before the message
+                # row is written, so the id still has to reach the browser.
+                if event.get("type") == "done" and event.get("final"):
                     break
         finally:
             if not task.done():

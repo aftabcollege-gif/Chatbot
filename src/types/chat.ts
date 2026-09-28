@@ -17,6 +17,10 @@ export interface Message {
   confidenceScore?: number;
   sources?: Source[];
   createdAt?: string;
+  /** Set when the question was resolved against the conversation (follow-up). */
+  resolvedQuery?: string;
+  /** How that query was produced: rewritten by the model or by the heuristic. */
+  queryMethod?: "llm" | "heuristic";
 }
 
 export const SOURCE_TYPE_LABELS: Record<Source["type"], string> = {

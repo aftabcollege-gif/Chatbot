@@ -1,12 +1,24 @@
-"""SQLite database engine, extension loading and schema bootstrap."""
+"""SQLite database engine, extension loading and schema bootstrap.
+
+Vector search works in three tiers, in order of preference:
+
+1. the ``sqlite-vec`` loadable extension (``vec0.dll``) when it can be found
+   and loaded, giving native ``vec0`` virtual tables;
+2. :mod:`core.vector_fallback` — a pure Python + numpy implementation of the
+   same tiny SQL surface, so semantic search keeps working with **no** DLL;
+3. plain keyword search (FTS5) as the final safety net.
+"""
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
 
+from . import vector_fallback
 from .config import settings
 
 _LOCAL = threading.local()
@@ -14,27 +26,119 @@ _LOCAL = threading.local()
 SCHEMA_VERSION = 1
 
 
-def _sqlite_vec_path() -> Optional[Path]:
-    """Locate the sqlite-vec loadable extension shipped with the pip package."""
+def _sqlite_vec_candidates() -> List[Path]:
+    """Every plausible location of the ``sqlite-vec`` loadable extension.
+
+    Historically only the pip package path and ``<root>/extensions`` were
+    searched, which is why packaged builds reported a degraded vector
+    extension: the installer put ``vec0.dll`` in one directory while the
+    frozen backend looked in another.  We now look in all of them.
+    """
+    names = ("sqlite_vec.dll", "vec0.dll", "sqlite_vec.so", "vec0.so", "vec0.dylib", "sqlite_vec")
+    roots: List[Path] = []
+
+    def add(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        try:
+            roots.append(Path(path))
+        except Exception:
+            return
+
+    # 1) pip package (dev installs / un-frozen runs)
     try:
         import sqlite_vec  # type: ignore
 
         raw = Path(sqlite_vec.loadable_path())
-        # The package ships the extension without a suffix on some platforms.
-        candidates = [raw]
-        if raw.suffix == "":
-            candidates.extend(
-                [raw.with_suffix(".dll"), raw.with_suffix(".so"), raw.with_suffix(".dylib")]
-            )
-        for c in candidates:
-            if c.exists():
-                return c
+        add(raw)
+        add(raw.parent)
     except Exception:
         pass
-    # Fallback: extensions dir next to the app
-    for ext in settings.extensions_dir.glob("sqlite_vec*"):
-        return ext
-    return None
+
+    # 2) bundled / install directories
+    add(getattr(settings, "extensions_dir", None))
+    add(settings.root)
+    add(settings.root / "extensions")
+    add(settings.root.parent)
+    add(settings.root.parent / "extensions")
+    add(settings.root.parent / "backend")
+    add(settings.root.parent / "backend" / "extensions")
+    add(settings.root / "_internal")
+    add(settings.root / "_internal" / "extensions")
+    add(Path(sys.executable).resolve().parent)
+    add(Path(sys.executable).resolve().parent / "extensions")
+    add(Path.cwd())
+    add(Path(getattr(sys, "_MEIPASS", settings.root)))
+    add(Path(getattr(sys, "_MEIPASS", settings.root)) / "extensions")
+    if os.environ.get("EAI_EXTENSIONS_DIR"):
+        add(Path(os.environ["EAI_EXTENSIONS_DIR"]))
+
+    found: List[Path] = []
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate.is_file() and candidate not in found:
+                found.append(candidate)
+    return found
+
+
+_VEC_LOAD_ERROR: Optional[str] = None
+_VEC_LOADED_PATH: Optional[str] = None
+
+
+def _load_vec_extension(conn: sqlite3.Connection) -> None:
+    """Best-effort load of the native vector extension (never raises)."""
+    global _VEC_LOAD_ERROR, _VEC_LOADED_PATH
+    for candidate in _sqlite_vec_candidates():
+        try:
+            conn.enable_load_extension(True)
+            try:
+                conn.load_extension(str(candidate))
+            finally:
+                conn.enable_load_extension(False)
+            _VEC_LOADED_PATH = str(candidate)
+            _VEC_LOAD_ERROR = None
+            return
+        except Exception as exc:  # keep trying the next candidate
+            _VEC_LOAD_ERROR = f"{candidate}: {exc}"
+            continue
+
+
+def _sqlite_vec_path() -> Optional[Path]:
+    """Backwards-compatible helper used by older call sites."""
+    candidates = _sqlite_vec_candidates()
+    return candidates[0] if candidates else None
+
+
+class _VecConnection(sqlite3.Connection):
+    """sqlite3 connection that transparently emulates ``vec0`` SQL.
+
+    When the native extension is unavailable every vector statement is routed
+    to :mod:`core.vector_fallback`, so callers (rag/search/knowledge services)
+    need no changes and semantic search keeps working offline.
+    """
+
+    native_vec = False
+
+    def execute(self, sql: str, parameters: Sequence[Any] = ()) -> sqlite3.Cursor:  # type: ignore[override]
+        if not self.native_vec and vector_fallback.is_fallback_statement(sql):
+            try:
+                cursor = vector_fallback.handle(self, sql, parameters)
+                if cursor is not None:
+                    return cursor
+            except Exception:
+                pass
+        return super().execute(sql, parameters)
+
+    def executemany(  # type: ignore[override]
+        self, sql: str, seq_of_parameters: Iterable[Sequence[Any]]
+    ) -> sqlite3.Cursor:
+        if not self.native_vec and vector_fallback.is_fallback_statement(sql):
+            cursor: Optional[sqlite3.Cursor] = None
+            for row in seq_of_parameters:
+                cursor = self.execute(sql, row) or cursor
+            return cursor if cursor is not None else super().execute("SELECT 1 WHERE 0")
+        return super().executemany(sql, seq_of_parameters)
 
 
 def _connect() -> sqlite3.Connection:
@@ -45,6 +149,7 @@ def _connect() -> sqlite3.Connection:
         check_same_thread=False,
         timeout=30.0,
         isolation_level=None,  # autocommit; we manage transactions explicitly
+        factory=_VecConnection,
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -54,14 +159,21 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA cache_size=-64000")
     conn.execute("PRAGMA mmap_size=268435456")
 
-    vec_path = _sqlite_vec_path()
-    if vec_path is not None:
+    _load_vec_extension(conn)
+
+    native = False
+    if _VEC_LOADED_PATH:
         try:
-            conn.enable_load_extension(True)
-            conn.load_extension(str(vec_path))
-            conn.enable_load_extension(False)
-        except sqlite3.OperationalError:
-            # Extension may fail on unusual platforms; degrade gracefully.
+            conn.execute("SELECT vec_version()")
+            native = True
+        except sqlite3.Error:
+            native = False
+    _VecConnection.native_vec = native
+    if not native:
+        # Pure-Python backend: give the emulated tables a home.
+        try:
+            vector_fallback.ensure_tables(conn)
+        except sqlite3.Error:
             pass
     return conn
 
@@ -530,13 +642,19 @@ PERMISSION_SEED = [
 def init_db() -> None:
     conn = get_conn()
     conn.executescript(SCHEMA_SQL)
-    # Vector tables require the sqlite-vec extension loaded.
-    try:
-        conn.execute(VEC_SQL_CHUNKS.format(dim=settings.embedding_dim))
-        conn.execute(VEC_SQL_KNOWLEDGE.format(dim=settings.embedding_dim))
-    except sqlite3.OperationalError:
-        # sqlite-vec unavailable — semantic search will degrade to FTS only.
-        pass
+    # Vector tables: native vec0 when the extension is loaded, otherwise the
+    # pure-Python/numpy emulation (which keeps semantic search working).
+    if _VecConnection.native_vec:
+        try:
+            conn.execute(VEC_SQL_CHUNKS.format(dim=settings.embedding_dim))
+            conn.execute(VEC_SQL_KNOWLEDGE.format(dim=settings.embedding_dim))
+        except sqlite3.Error:
+            pass
+    else:
+        try:
+            vector_fallback.ensure_tables(conn)
+        except sqlite3.Error:
+            pass
     # Seed permissions.
     for code, desc in PERMISSION_SEED:
         conn.execute(
@@ -561,8 +679,29 @@ def init_db() -> None:
 
 
 def vec_available() -> bool:
+    """True when *some* vector backend is usable (native or numpy fallback)."""
     try:
         get_conn().execute("SELECT 1 FROM chunks_vec LIMIT 1")
         return True
-    except sqlite3.OperationalError:
+    except sqlite3.Error:
         return False
+
+
+def vec_backend() -> str:
+    """``sqlite-vec`` | ``numpy`` | ``none`` — shown on the health page."""
+    if not vec_available():
+        return "none"
+    return "sqlite-vec" if _VecConnection.native_vec else "numpy"
+
+
+def vec_load_error() -> Optional[str]:
+    """Why the native extension was not used (empty when it loaded fine)."""
+    if _VecConnection.native_vec:
+        return None
+    if _VEC_LOADED_PATH:
+        return f"loaded but unusable: {_VEC_LOADED_PATH}"
+    return _VEC_LOAD_ERROR or "vec0 extension not found"
+
+
+def vec_loaded_path() -> Optional[str]:
+    return _VEC_LOADED_PATH

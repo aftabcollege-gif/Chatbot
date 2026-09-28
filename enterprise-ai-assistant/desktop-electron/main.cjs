@@ -121,8 +121,10 @@ function startLlm() {
       "127.0.0.1",
       "--port",
       String(LLM_PORT),
+      // 8192 tokens shared by --parallel 2 => 4096 per request, matching
+      // llm.context_size in config/default.yaml and the backend's prompt budget.
       "--ctx-size",
-      "4096",
+      "8192",
       "--threads",
       threads,
       "--parallel",

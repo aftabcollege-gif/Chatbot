@@ -44,6 +44,13 @@ export function MessageBubble({ message, userName }: MessageBubbleProps) {
           {message.content}
         </div>
 
+        {!isUser && message.resolvedQuery && (
+          <div className="mt-2 text-xs text-emerald-300/80 border-r-2 border-emerald-500/40 pr-2">
+            <span className="text-gray-400">پرسش با توجه به گفت‌وگو تکمیل شد: </span>
+            <span>{message.resolvedQuery}</span>
+          </div>
+        )}
+
         {message.confidenceScore !== undefined && message.confidenceScore > 0 && (
           <div className="mt-2 flex items-center gap-2 text-xs text-gray-500">
             <span>اطمینان: {Math.round(message.confidenceScore * 100)}%</span>

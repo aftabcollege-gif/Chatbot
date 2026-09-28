@@ -45,6 +45,9 @@ export interface Message {
   sources?: MessageSource[];
   streaming?: boolean;
   error?: boolean;
+  /** Set when a follow-up question was resolved against the conversation. */
+  resolved_query?: string;
+  resolved_method?: string;
 }
 
 export interface Conversation {

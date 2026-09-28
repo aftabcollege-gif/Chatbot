@@ -43,7 +43,7 @@ export function ModelsPage() {
                   {exists ? (
                     <Badge variant="success"><CheckCircle2 className="h-3 w-3 ms-1" /> موجود</Badge>
                   ) : (
-                    <Badge variant="warning"><AlertTriangle className="h-3 w-3 ms-1" /> بارگذاری نشده</Badge>
+                    <Badge variant="warning"><AlertTriangle className="h-3 w-3 ms-1" /> پیدا نشد</Badge>
                   )}
                 </CardHeader>
                 <CardContent className="text-sm space-y-1.5">
@@ -52,6 +52,20 @@ export function ModelsPage() {
                   {s.data.dimension && <Row label="ابعاد" value={toPersianDigits(s.data.dimension)} />}
                   {s.data.context_size && <Row label="اندازه کانتکست" value={toPersianDigits(s.data.context_size)} />}
                   <Row label="مسیر" value={<code className="text-xs font-mono text-muted-foreground break-all">{s.data.model_path}</code>} />
+                  {typeof s.data.files === "number" && <Row label="تعداد فایل‌ها" value={toPersianDigits(s.data.files)} />}
+                  {s.key === "llm" && s.data.server_ok !== undefined && (
+                    <Row label="سرویس مدل" value={s.data.server_ok ? "فعال" : "غیرفعال"} />
+                  )}
+                  {!exists && Array.isArray(s.data.searched) && s.data.searched.length > 0 && (
+                    <details className="pt-1">
+                      <summary className="cursor-pointer text-xs text-muted-foreground">مسیرهای بررسی‌شده</summary>
+                      <ul className="mt-1 space-y-0.5">
+                        {s.data.searched.slice(0, 8).map((p: string) => (
+                          <li key={p}><code className="text-[11px] font-mono text-muted-foreground break-all">{p}</code></li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   <Row label="حجم روی دیسک" value={<span className="flex items-center gap-1"><HardDrive className="h-3 w-3" /> {toPersianDigits(formatBytes(s.data.size_mb * 1024 * 1024))}</span>} />
                   {s.extra && <Row label="وضعیت سرویس" value={s.extra} />}
                 </CardContent>

@@ -14,6 +14,7 @@
 import { hybridSearch, type RetrievedChunk } from "@/lib/rag/search";
 import { llmChat } from "@/lib/ai/orchestrator";
 import { queryTerms, searchTokens } from "@/lib/text/normalize";
+import { resolveStandaloneQuery, type ChatTurn } from "@/lib/rag/query-context";
 
 /** Warn once per process (the portable console is user-visible). */
 const warned = new Set<string>();
@@ -64,8 +65,14 @@ export interface RAGResult {
   sources: RagSource[];
   confidence: number;
   usedLLM: boolean;
+  /** Standalone query actually used for retrieval (only when it changed). */
+  resolvedQuery?: string;
+  /** How that query was produced: rewritten by the LLM or by the heuristic. */
+  queryMethod?: "llm" | "heuristic";
   ragTrace: {
     question: string;
+    resolvedQuery?: string;
+    queryMethod?: string;
     retrievedCount: number;
     filteredCount: number;
     topScores: number[];
@@ -242,23 +249,36 @@ function buildExtractiveAnswer(question: string, sources: RagSource[]): string {
 }
 
 /**
- * Full RAG pipeline — retrieve, rerank, generate, cite
+ * Full RAG pipeline — resolve the question, retrieve, rerank, generate, cite
+ *
+ * Step 0 (before anything is retrieved) resolves a follow-up question against
+ * the conversation: «برای مدیران هم همین‌طور است؟» must be searched as a
+ * self-contained query, otherwise the subject is missing and the wrong chunks
+ * are found. See `rag/query-context.ts`.
  *
  * @param question - User's question
  * @param organizationId - Organization scope (REQUIRED — tenant isolation)
  * @param _departmentId - Department scope (kept for API compatibility)
  * @param _userId - Requesting user ID (kept for API compatibility)
+ * @param history - Previous turns of this conversation (oldest first)
  */
 export async function answerWithRag(
   question: string,
   organizationId: string,
   _departmentId: string | null,
   _userId: string,
+  history: ChatTurn[] = [],
 ): Promise<RAGResult> {
   const startMs = Date.now();
 
+  // Step 0: Resolve the relation between this question and the previous ones.
+  const resolution = await resolveStandaloneQuery(question, history);
+  const searchQuery = resolution.query;
+  const resolvedQuery = resolution.rewritten ? searchQuery : undefined;
+  const queryMethod = resolution.rewritten ? resolution.method : undefined;
+
   // Step 1: Hybrid search (semantic + keyword) — fully in PostgreSQL.
-  const chunks = await hybridSearch(organizationId, question);
+  const chunks = await hybridSearch(organizationId, searchQuery);
 
   if (!chunks.length) {
     return {
@@ -266,8 +286,12 @@ export async function answerWithRag(
       sources: [],
       confidence: 0,
       usedLLM: false,
+      resolvedQuery,
+      queryMethod: queryMethod === "llm" || queryMethod === "heuristic" ? queryMethod : undefined,
       ragTrace: {
         question,
+        resolvedQuery,
+        queryMethod,
         retrievedCount: 0,
         filteredCount: 0,
         topScores: [],
@@ -284,6 +308,8 @@ export async function answerWithRag(
 
   const ragTrace = {
     question,
+    resolvedQuery,
+    queryMethod,
     retrievedCount: chunks.length,
     filteredCount: usedSources.length,
     topScores: chunks.slice(0, 5).map((c) => c.fusedScore),
@@ -313,6 +339,8 @@ export async function answerWithRag(
       sources: usedSources,
       confidence,
       usedLLM: true,
+      resolvedQuery,
+      queryMethod: queryMethod === "llm" || queryMethod === "heuristic" ? queryMethod : undefined,
       ragTrace,
     };
   } catch (llmError) {
@@ -322,10 +350,14 @@ export async function answerWithRag(
     ragTrace.responseTimeMs = Date.now() - startMs;
 
     return {
-      answer: buildExtractiveAnswer(question, usedSources),
+      // The resolved query carries the subject of a follow-up question, so it
+      // scores the extracted sentences better than the bare message.
+      answer: buildExtractiveAnswer(searchQuery, usedSources),
       sources: usedSources,
       confidence: usedSources[0]?.relevanceScore ?? 0,
       usedLLM: false,
+      resolvedQuery,
+      queryMethod: queryMethod === "llm" || queryMethod === "heuristic" ? queryMethod : undefined,
       ragTrace,
     };
   }

@@ -14,9 +14,17 @@ llm:
   # the strongest model present (7B preferred when available).
   model_name: "qwen2.5-1.5b-instruct"
   model_path: "models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-  context_size: 4096
+  # llama-server is started with this context (see the desktop shells); it is
+  # ALSO the budget the backend plans the prompt against. With --parallel 2 the
+  # server splits it between two slots, so a prompt may use
+  # context_size / parallel tokens (4096 with the defaults below).
+  context_size: 8192
+  parallel: 2
+  # Tokens reserved for the answer; llm_service never asks for more than the
+  # remaining budget, otherwise llama-server rejects the request with HTTP 400.
+  max_tokens: 1024
+  reserve_tokens: 320
   temperature: 0.1
-  max_tokens: 2048
   threads: 0
   gpu_layers: 0
 
@@ -37,6 +45,16 @@ rag:
   context_max_tokens: 3000
   chat_history_max_tokens: 1500
   min_confidence: 0.3
+  # A retrieved chunk is only offered as a source when it carries some evidence:
+  # either its meaningful query terms are present (lexical coverage) or the
+  # vector search is confident about it. This is what stops the assistant from
+  # citing unrelated procedures.
+  min_relevance: 0.08
+  # One document must not fill the whole source list (chunks overlap, so the
+  # same section used to appear two or three times).
+  max_chunks_per_source: 2
+  # Two chunks whose text is that similar are the same section.
+  duplicate_similarity: 0.75
 
 ocr:
   provider: "tesseract"

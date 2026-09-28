@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from core import database as db
 from services.embedding_service import get_embedding_service
 from services.normalizer_service import normalize_for_index
-from utils.persian import tokenize
+from utils.persian import fts_query
 
 
 def _access_clause(user: dict, alias: str = "c") -> tuple[str, list]:
@@ -33,7 +33,9 @@ def global_search(
 ) -> dict:
     start = time.time()
     results: List[Dict[str, Any]] = []
-    match_q = " OR ".join(tokenize(q))[:1000] or q
+    # ZWNJ-tolerant, quoted terms (see utils.persian.fts_query); stop-words are
+    # dropped so a word like «فرآیند» does not match the whole corpus.
+    match_q = fts_query(q, limit=24, max_chars=1000)
 
     if result_type in (None, "document", "chunk"):
         clauses = []
@@ -161,7 +163,7 @@ def global_search(
 def suggestions(q: str, limit: int = 8) -> list:
     if not q.strip():
         return []
-    match_q = " OR ".join(tokenize(q))[:500] or q
+    match_q = fts_query(q, limit=12, max_chars=500)
     try:
         rows = db.query_all(
             """SELECT DISTINCT d.title FROM chunks_fts

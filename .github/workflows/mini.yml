@@ -1,0 +1,302 @@
+name: Build Mini Fix EXE (small download)
+
+# Produces ONE small Windows executable (≈35 MB, no installer, no admin
+# rights) that repairs an installed Chatbot Enterprise and/or runs the fixed
+# application.  Published to the rolling release tag `mini-latest` so the
+# download link is always:
+#     https://github.com/aftabcollege-gif/Chatbot/releases/download/mini-latest/Chatbot-Enterprise-Mini.exe
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, "arena/**"]
+    paths:
+      - "enterprise-ai-assistant/backend/**"
+      - "enterprise-ai-assistant/frontend/**"
+      - "enterprise-ai-assistant/tools/mini/**"
+      - ".github/workflows/mini.yml"
+
+concurrency:
+  group: mini-exe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: enterprise-ai-assistant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: pip
+          cache-dependency-path: enterprise-ai-assistant/backend/requirements.txt
+
+      - name: Install Python dependencies for the mini bundle
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          # Everything the offline app needs except the heavy AI runtimes
+          # (onnxruntime/tokenizers are excluded on purpose: the bundle uses
+          # the numpy vector index and reuses installed models when present).
+          pip install fastapi==0.111.0 "uvicorn[standard]==0.30.1" pydantic==2.7.4 `
+            pydantic-settings==2.3.4 SQLAlchemy==2.0.31 python-multipart==0.0.9 `
+            PyYAML==6.0.1 argon2-cffi==23.1.0 "python-jose[cryptography]==3.3.0" `
+            httpx==0.27.0 python-docx==1.1.2 openpyxl==3.1.5 python-pptx==0.6.23 `
+            pdfplumber==0.11.4 beautifulsoup4==4.12.3 markdown==3.6 langdetect==1.0.9 `
+            numpy==1.26.4 pyinstaller==6.11.0
+          pip install sqlite-vec==0.1.3
+
+      - name: Stage the native vector extension (vec0.dll)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path tools\mini\extensions | Out-Null
+          $dll = python -c "import sqlite_vec,os;print(os.path.join(os.path.dirname(sqlite_vec.__file__),'vec0.dll'))"
+          if (!(Test-Path $dll)) { throw "vec0.dll not found in the sqlite-vec wheel" }
+          Copy-Item $dll tools\mini\extensions\vec0.dll -Force
+          Write-Host "staged: $((Get-Item tools\mini\extensions\vec0.dll).Length) bytes"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: enterprise-ai-assistant/frontend/package-lock.json
+
+      - name: Build the web UI
+        working-directory: enterprise-ai-assistant/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Unit tests (port policy + follow-up questions)
+        shell: pwsh
+        run: |
+          # No third-party import is needed: both suites run on the standard
+          # library alone, so they guard the behaviour even if a wheel fails.
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Build the single-file EXE
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean tools\mini\mini.spec
+          if (!(Test-Path dist\Chatbot-Enterprise-Mini.exe)) { throw "EXE was not produced" }
+          $exe = Get-Item dist\Chatbot-Enterprise-Mini.exe
+          Write-Host ("EXE size: {0:N1} MB" -f ($exe.Length / 1MB))
+          Get-FileHash $exe.FullName -Algorithm SHA256 | Tee-Object -FilePath dist\SHA256SUMS.txt | Format-List
+
+      - name: Smoke test the EXE (repair + serve)
+        id: smoke
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $report = "dist\smoke-report.txt"
+          "== Chatbot Enterprise Mini — smoke test ==" | Out-File $report -Encoding utf8
+          "exe size: $((Get-Item dist\Chatbot-Enterprise-Mini.exe).Length)" | Out-File $report -Append
+
+          # 1) repair-only run: must create the database + credentials, exit 0
+          $out  = & dist\Chatbot-Enterprise-Mini.exe --repair-only --serve-only 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          "---- repair-only exit code: $code ----" | Out-File $report -Append
+          $out | Out-File $report -Append
+          "LASTEXITCODE_REPAIR=$code" | Tee-Object -FilePath dist\LASTEXITCODE.txt
+
+          # 2) serve run: the application itself must answer on /api/health
+          $proc = Start-Process -FilePath "dist\Chatbot-Enterprise-Mini.exe" `
+            -ArgumentList "--serve-only", "--no-browser", "--port", "8799" -PassThru `
+            -RedirectStandardOutput "dist\serve-stdout.txt" -RedirectStandardError "dist\serve-stderr.txt"
+          $ok = $false
+          for ($i = 0; $i -lt 45; $i++) {
+            try {
+              $r = Invoke-WebRequest "http://127.0.0.1:8799/api/health" -UseBasicParsing -TimeoutSec 3
+              $ok = $true
+              break
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          if ($ok) {
+            "---- /api/health: $($r.StatusCode) $($r.Content)" | Out-File $report -Append
+          } else {
+            "---- /api/health: NO ANSWER after 90s" | Out-File $report -Append
+          }
+          try { Invoke-WebRequest "http://127.0.0.1:8799/api/setup/bootstrap-info" -UseBasicParsing -TimeoutSec 5 |
+                  Select-Object -ExpandProperty Content | Out-File $report -Append } catch {}
+          try { Stop-Process -Id $proc.Id -Force } catch {}
+          "---- serve stdout ----" | Out-File $report -Append
+          Get-Content dist\serve-stdout.txt -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-File $report -Append
+          "---- serve stderr ----" | Out-File $report -Append
+          Get-Content dist\serve-stderr.txt -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-File $report -Append
+          "---- APPDATA\EnterpriseAI ----" | Out-File $report -Append
+          Get-ChildItem -Recurse "$env:APPDATA\EnterpriseAI" -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName | Out-File $report -Append
+          if (Test-Path "$env:APPDATA\EnterpriseAI\ADMIN-CREDENTIALS.txt") {
+            Get-Content "$env:APPDATA\EnterpriseAI\ADMIN-CREDENTIALS.txt" | Select-Object -First 6 | Out-File $report -Append
+          }
+          Get-Content $report
+
+      - name: Smoke test the port policy (the address must not move)
+        id: port_smoke
+        shell: pwsh
+        run: |
+          # Reported problem: "every time I run the mini file the port changes".
+          # This test pins the policy down:
+          #   1) a plain run serves on the application's own port (8741);
+          #   2) a second run while the port is busy must NOT move elsewhere,
+          #      must NOT close the running copy and must exit with code 4.
+          $report = "dist\port-smoke-report.txt"
+          "== port policy smoke test ==" | Out-File $report -Encoding utf8
+          $exe = "dist\Chatbot-Enterprise-Mini.exe"
+          "" | Out-File "dist\empty-stdin.txt" -Encoding ascii
+
+          # Start from a quiet machine: kill any leftover listener on 8741.
+          Get-NetTCPConnection -LocalPort 8741 -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object { try { "killing leftover pid $($_.OwningProcess)" | Out-File $report -Append
+                                   Stop-Process -Id $_.OwningProcess -Force } catch {} }
+          Start-Sleep -Seconds 2
+
+          # ---- 1) the default run must serve on 8741 -------------------------
+          $first = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
+            -RedirectStandardInput "dist\empty-stdin.txt" `
+            -RedirectStandardOutput "dist\port-first-stdout.txt" -RedirectStandardError "dist\port-first-stderr.txt"
+          "first instance pid: $($first.Id)" | Out-File $report -Append
+
+          $ok = $false
+          for ($i = 0; $i -lt 45; $i++) {
+            if ($first.HasExited) { "first instance exited early with $($first.ExitCode)" | Out-File $report -Append; break }
+            try {
+              Invoke-WebRequest "http://127.0.0.1:8741/api/health" -UseBasicParsing -TimeoutSec 3 | Out-Null
+              $ok = $true
+              break
+            } catch { Start-Sleep -Seconds 2 }
+          }
+          "default port 8741 answered: $ok" | Out-File $report -Append
+
+          $moved = @()
+          $code = "n/a"
+          if ($ok) {
+            # ---- 2) a second run must refuse to move -------------------------
+            $second = Start-Process -FilePath $exe -ArgumentList "--serve-only", "--no-browser" -PassThru `
+              -RedirectStandardInput "dist\empty-stdin.txt" `
+              -RedirectStandardOutput "dist\port-second-stdout.txt" -RedirectStandardError "dist\port-second-stderr.txt"
+            $exited = $second.WaitForExit(120000)
+            $code = if ($exited) { $second.ExitCode } else { "timeout" }
+            if (-not $exited) { try { Stop-Process -Id $second.Id -Force } catch {} }
+            "second instance exit code: $code" | Out-File $report -Append
+
+            foreach ($port in 8751, 8752, 8753, 8742) {
+              $client = New-Object System.Net.Sockets.TcpClient
+              try {
+                $client.Connect("127.0.0.1", $port)
+                $moved += $port
+              } catch { } finally { $client.Dispose() }
+            }
+            "ports that silently appeared: $($moved -join ', ')" | Out-File $report -Append
+          }
+
+          try { Stop-Process -Id $first.Id -Force } catch {}
+          "---- first instance stdout ----" | Out-File $report -Append
+          Get-Content "dist\port-first-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Out-File $report -Append
+          "---- first instance stderr ----" | Out-File $report -Append
+          Get-Content "dist\port-first-stderr.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Out-File $report -Append
+          "---- second instance stdout ----" | Out-File $report -Append
+          Get-Content "dist\port-second-stdout.txt" -ErrorAction SilentlyContinue | Select-Object -Last 40 | Out-File $report -Append
+          "---- second instance stderr ----" | Out-File $report -Append
+          Get-Content "dist\port-second-stderr.txt" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Out-File $report -Append
+          Get-Content $report
+
+          if ($moved.Count -gt 0) { throw "the port moved without the user's approval: $($moved -join ', ')" }
+          if (-not $ok) { throw "the default run did not serve on port 8741" }
+          if ("$code" -ne "4") { throw "a run with a busy port must exit with code 4 (got $code)" }
+          Write-Host "port policy honoured: no silent port change, exit code 4"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Chatbot-Enterprise-Mini
+          path: |
+            enterprise-ai-assistant/dist/Chatbot-Enterprise-Mini.exe
+            enterprise-ai-assistant/dist/SHA256SUMS.txt
+            enterprise-ai-assistant/dist/smoke-report.txt
+            enterprise-ai-assistant/dist/serve-stdout.txt
+            enterprise-ai-assistant/dist/serve-stderr.txt
+            enterprise-ai-assistant/dist/port-smoke-report.txt
+            enterprise-ai-assistant/dist/port-first-stdout.txt
+            enterprise-ai-assistant/dist/port-first-stderr.txt
+            enterprise-ai-assistant/dist/port-second-stdout.txt
+            enterprise-ai-assistant/dist/port-second-stderr.txt
+          retention-days: 30
+
+      - name: Publish the smoke report on failure (diagnostics)
+        if: failure()
+        shell: pwsh
+        run: |
+          # Keeps the report readable even when the Actions log stream is not
+          # reachable from the maintainer's network: the file is committed to
+          # the branch the build came from.
+          New-Item -ItemType Directory -Force -Path ..\.ci | Out-Null
+          Copy-Item dist\smoke-report.txt ..\.ci\mini-smoke-report.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\serve-stderr.txt ..\.ci\mini-serve-stderr.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\serve-stdout.txt ..\.ci\mini-serve-stdout.txt -Force -ErrorAction SilentlyContinue
+          # port-policy diagnostics
+          Copy-Item dist\port-smoke-report.txt ..\.ci\mini-port-smoke-report.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-first-stdout.txt ..\.ci\mini-port-first-stdout.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-first-stderr.txt ..\.ci\mini-port-first-stderr.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-second-stdout.txt ..\.ci\mini-port-second-stdout.txt -Force -ErrorAction SilentlyContinue
+          Copy-Item dist\port-second-stderr.txt ..\.ci\mini-port-second-stderr.txt -Force -ErrorAction SilentlyContinue
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f ..\.ci
+          git commit -q -m "ci: mini smoke diagnostics [skip ci]"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - name: Enforce the smoke test before publishing
+        shell: pwsh
+        run: |
+          $report = Get-Content dist\smoke-report.txt -Raw
+          if ($report -notmatch "repair-only exit code: 0") { throw "repair-only run failed:$report" }
+          if ($report -notmatch "/api/health: 200") { throw "the application did not answer /api/health:$report" }
+
+      - name: Publish to the rolling release (stable download link)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # softprops/action-gh-release reports success but SKIPS an asset whose
+          # name already exists — that is how the download link kept serving an
+          # older, broken mini EXE.  The CLI with --clobber really replaces it.
+          $release = "mini-latest"
+          $notes = @'
+            ## فایل کوچک تعمیر و اجرا — Chatbot Enterprise Mini
+
+            یک فایل EXE کوچک (بدون نیاز به cmd یا PowerShell و بدون دسترسی مدیر):
+
+            1. نسخهٔ نصب‌شدهٔ برنامه را تعمیر می‌کند
+               (صفحهٔ سفید، افزونهٔ برداری و ساخت/بازنشانی رمز مدیر)
+            2. سپس خود برنامه را در مرورگر باز می‌کند.
+
+            پورت پیش‌فرض همان پورت خود برنامه (۸۷۴۱) است و بدون تأیید شما
+            عوض نمی‌شود.
+
+            پس از اجرا، نام کاربری و رمز عبور مدیر در همین پنجره نمایش داده
+            می‌شود و در فایل `ADMIN-CREDENTIALS.txt` ذخیره می‌گردد.
+
+            دانلود: `Chatbot-Enterprise-Mini.exe`
+          '@
+          $notes | Out-File dist\release-notes.md -Encoding utf8
+
+          gh release view $release *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $release --title "نسخهٔ کوچک تعمیر و اجرا (Mini)" `
+              --notes-file dist\release-notes.md --target ${{ github.sha }} --latest=false
+          } else {
+            gh release edit $release --notes-file dist\release-notes.md
+          }
+          gh release upload $release dist\Chatbot-Enterprise-Mini.exe dist\SHA256SUMS.txt --clobber
+          gh release view $release --json assets -q '.assets[] | "\(.name)  \(.size) bytes  \(.createdAt)"'
